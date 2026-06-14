@@ -25,6 +25,9 @@ namespace ColonyFramework
         private const int BoreDrilling   = 2;
         private const int BoreAscend     = 3;
 
+        private const int RetreatAscend = 0; // reverse straight up out of the shaft
+        private const int RetreatReturn = 1; // autopilot to the colony-core standoff
+
         private const float  TransitSpeedLimit  = 25f;
         private const double ArriveDistance     = 15.0;
         private const double CommissionSpikeSecs = 1.0;
@@ -48,6 +51,8 @@ namespace ColonyFramework
         private const double RepoSpeed         = 2.0;
         private const double RepoTolerance     = 0.4;
         private const double RetreatAscendSpeed = 3.0;
+        private const double ReturnClearanceAlt   = 30.0; // climb to this (m above surface) out of the shaft before returning
+        private const double ReturnStandoffHeight = 40.0; // hold this far above the colony core
 
         private const double CargoThreshold     = 0.80;
         private const double LowPowerThreshold  = 0.20;
@@ -71,6 +76,7 @@ namespace ColonyFramework
         private bool _progressInit;
 
         private int _boreSub;
+        private int _retreatSub;
         private int _boreIndex;
         private bool _oriented;
         private DateTime _subStart;
@@ -316,8 +322,8 @@ namespace ColonyFramework
             }
             else // BoreAscend
             {
-                _bore.Drive(grid, drillFwd, downDir, 0);                 // hold nose-down
-                _bore.ThrustAlong(grid, -downDir, RetreatAscendSpeed);    // climb straight up
+                _bore.Drive(grid, drillFwd, downDir, 0);                       // hold nose-down
+                _bore.ThrustAlong(grid, -downDir, RetreatAscendSpeed, 1.0f);    // full-power climb (heavy with cargo)
                 if (gotAlt && altitude >= ClearanceAlt)
                 {
                     _boreIndex++;
@@ -352,6 +358,7 @@ namespace ColonyFramework
         {
             DroneUtil.SetDrills(grid, false);
             _bore.Release(grid); // clear gyro + thrust overrides so retreat thrust takes effect
+            _retreatSub = RetreatAscend;
             m.Phase = PhaseRetreat;
             MyLog.Default.WriteLineAndConsole(string.Format(
                 "[ColonyFramework] Mission {0}: retreating ({1})", m.Id, reason));
@@ -359,21 +366,88 @@ namespace ColonyFramework
 
         private void TickRetreating(Colony colony, Mission m, DepositRecord deposit, IMyCubeGrid grid)
         {
-            Vector3D standoff = NavMath.ComputeStandoff(deposit.Position, grid.GetPosition());
-            Vector3D toStandoff = standoff - grid.GetPosition();
-            if (toStandoff.Length() > ArriveDistance)
+            Vector3D pos = grid.GetPosition();
+            float interference;
+            Vector3D gravity = MyAPIGateway.Physics.CalculateNaturalGravityAt(pos, out interference);
+            Vector3D downDir = gravity.LengthSquared() > 0.01
+                ? Vector3D.Normalize(gravity)
+                : Vector3D.Normalize(deposit.Position - pos);
+
+            if (_retreatSub == RetreatAscend)
             {
-                _bore.ThrustAlong(grid, Vector3D.Normalize(toStandoff), RetreatAscendSpeed);
+                // Reverse straight up out of the shaft: hold nose-down (so up-thrusters keep
+                // pointing up) and climb at FULL power (the drone is heavy with cargo).
+                var drills = DroneUtil.FindDrills(grid);
+                Vector3D drillFwd = drills.Count > 0 ? drills[0].WorldMatrix.Forward : downDir;
+                _bore.Drive(grid, drillFwd, downDir, 0);
+                _bore.ThrustAlong(grid, -downDir, RetreatAscendSpeed, 1.0f);
+
+                double alt;
+                bool clear = DroneUtil.TryGetAltitude(grid, out alt)
+                    ? alt >= ReturnClearanceAlt
+                    : Vector3D.Distance(pos, deposit.Position) >= ReturnClearanceAlt;
+                if (!clear) return;
+
+                _bore.Release(grid); // hand control to autopilot for the trip home
+                MyLog.Default.WriteLineAndConsole(string.Format(
+                    "[ColonyFramework] Mission {0}: mining mission complete, returning to base", m.Id));
+                if (!MyAPIGateway.Utilities.IsDedicated)
+                    MyAPIGateway.Utilities.ShowMessage("Colony", "Mining mission complete, returning to base");
+
+                if (!EngageReturn(colony, grid)) { CompleteMission(colony, m, grid); return; } // no core → finish here
+                _retreatSub = RetreatReturn;
                 return;
             }
 
+            // RetreatReturn: RC autopilot flies to the colony-core standoff; complete on arrival.
+            Vector3D coreStandoff;
+            if (!TryCoreStandoff(colony, out coreStandoff)) { CompleteMission(colony, m, grid); return; }
+            if (Vector3D.Distance(pos, coreStandoff) > ArriveDistance) return;
+
+            var rc = DroneUtil.FindRc(grid);
+            if (rc != null) rc.SetAutoPilotEnabled(false);
+            CompleteMission(colony, m, grid);
+        }
+
+        private bool EngageReturn(Colony colony, IMyCubeGrid grid)
+        {
+            Vector3D standoff;
+            if (!TryCoreStandoff(colony, out standoff)) return false;
+            var rc = DroneUtil.FindRc(grid);
+            if (rc == null) return false;
+            rc.ClearWaypoints();
+            rc.AddWaypoint(standoff, "Colony core standoff");
+            rc.FlightMode = FlightMode.OneWay;
+            rc.SpeedLimit = TransitSpeedLimit;
+            rc.SetAutoPilotEnabled(true);
+            return true;
+        }
+
+        // A holding point ReturnStandoffHeight metres above the colony core block.
+        private bool TryCoreStandoff(Colony colony, out Vector3D standoff)
+        {
+            standoff = Vector3D.Zero;
+            long coreId = colony.State.CoreEntityId;
+            if (coreId == 0) return false;
+            var core = MyAPIGateway.Entities.GetEntityById(coreId);
+            if (core == null) return false;
+            Vector3D corePos = core.GetPosition();
+            float interference;
+            Vector3D g = MyAPIGateway.Physics.CalculateNaturalGravityAt(corePos, out interference);
+            Vector3D up = g.LengthSquared() > 0.01 ? -Vector3D.Normalize(g) : Vector3D.Up;
+            standoff = corePos + up * ReturnStandoffHeight;
+            return true;
+        }
+
+        private void CompleteMission(Colony colony, Mission m, IMyCubeGrid grid)
+        {
             _bore.Release(grid);
             double cargo = DroneUtil.CargoFill(grid);
             colony.Missions.Complete(m.Id);
             var asset = colony.Assets.GetByEntityId(m.AssignedAssetId);
             if (asset != null) { asset.Status = AssetStatus.Idle; asset.AssignedMissionId = 0; }
             MyLog.Default.WriteLineAndConsole(string.Format(
-                "[ColonyFramework] Mission {0} complete: deposit {1} mined (cargo {2:N0}%), asset idle",
+                "[ColonyFramework] Mission {0} complete: deposit {1} mined (cargo {2:N0}%), asset idle, at base standoff",
                 m.Id, m.TargetDepositId, cargo * 100));
         }
 

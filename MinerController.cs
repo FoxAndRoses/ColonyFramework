@@ -71,7 +71,9 @@ namespace ColonyFramework
         private const double RetreatAscendSpeed = 3.0;
         private const double LevelDot           = 0.95; // drone "up" vs anti-gravity before heading home
         private const double ReturnClearanceAlt   = 30.0; // climb to this (m above surface) out of the shaft before returning
-        private const double ReturnStandoffHeight = 40.0; // hold this far above the colony core
+        private const double ReturnStandoffHeight = 100.0; // hold this far above the colony core (high, so the return cruise clears terrain)
+        private const double CruiseAltitudeAgl    = 100.0; // climb to >= this (m above surface) before cruising — ground-avoidance floor
+        private const double RecoverLevelTimeoutSecs = 10.0; // max time to gyro-level during a soft reset before resuming anyway
 
         // Docking is connector-relative and uses the DRONE CONNECTOR (not the RC) as the distance
         // reference. 3 steps: fly over the connector (StageFwd out + StageUp up) → descend straight
@@ -128,6 +130,9 @@ namespace ColonyFramework
         private double _legMinDist;   // closest approach to the leg's waypoint (for runaway detection)
         private DateTime _legProgressTime; // last time the leg got closer to its waypoint (for stuck detection)
         private int _retries;         // retries used at the current stuck point (reset on forward progress)
+        private bool _recovering;     // soft reset in progress: stop + gyro-level before resuming
+        private int _recoverResume;   // the phase to re-acquire once leveled
+        private DateTime _recoverStart;
         private int _boreIndex;
         private bool _oriented;
         private DateTime _subStart;
@@ -142,6 +147,7 @@ namespace ColonyFramework
             if (!_started) { _started = true; OnResume(colony, m, deposit, grid); }
             try
             {
+                if (_recovering) { TickRecover(colony, m, deposit, grid); return; }
                 switch (m.Phase)
                 {
                     case PhaseCommission: TickCommission(colony, m, deposit, grid); break;
@@ -230,14 +236,27 @@ namespace ColonyFramework
         private void EngageTransit(IMyCubeGrid grid, DepositRecord deposit)
         {
             DroneUtil.ReleaseGrid(grid);
+            Vector3D standoff = NavMath.ComputeStandoff(deposit.Position, grid.GetPosition());
+            EngageCruise(grid, standoff, TransitSpeedLimit, "Deposit " + deposit.Id + " standoff");
+        }
+
+        // Climb-then-cruise RC route used for the long transit/return legs: climb STRAIGHT UP to a
+        // safe cruise altitude first (if below it), then fly diagonally to the high standoff — so the
+        // drone never skims terrain on a straight A→B line. RC autopilot can climb up and descend
+        // diagonally fine; it just can't pitch straight down, so the route never ends straight below.
+        private void EngageCruise(IMyCubeGrid grid, Vector3D target, float speed, string label)
+        {
             var rc = DroneUtil.FindRc(grid);
             if (rc == null) return;
-            rc.DampenersOverride = true; // ensure dampeners ON for the whole mission (heals any drone left off by an old build)
-            Vector3D standoff = NavMath.ComputeStandoff(deposit.Position, grid.GetPosition());
+            rc.DampenersOverride = true; // autopilot needs dampeners to brake (also heals a drone left off)
             rc.ClearWaypoints();
-            rc.AddWaypoint(standoff, "Deposit " + deposit.Id + " standoff");
+            Vector3D pos = grid.GetPosition();
+            double agl;
+            if (DroneUtil.TryGetAltitude(grid, out agl) && agl < CruiseAltitudeAgl)
+                rc.AddWaypoint(pos + Up(pos) * (CruiseAltitudeAgl - agl), "climb to cruise");
+            rc.AddWaypoint(target, label);
             rc.FlightMode = FlightMode.OneWay;
-            rc.SpeedLimit = TransitSpeedLimit;
+            rc.SpeedLimit = speed;
             rc.SetAutoPilotEnabled(true);
             ResetLeg();
         }
@@ -326,12 +345,48 @@ namespace ColonyFramework
 
             MyLog.Default.WriteLineAndConsole(string.Format(
                 "[ColonyFramework] Mission {0}: retry {1}/{2} — {3}", m.Id, _retries, MaxRetries, reason));
-            StabilizeDrone(grid);
-            switch (m.Phase)
+            BeginRecover(grid, m.Phase);
+        }
+
+        // Soft reset: stop on dampeners and enter the gyro-level recovery before re-acquiring the leg.
+        private void BeginRecover(IMyCubeGrid grid, int resumePhase)
+        {
+            StabilizeDrone(grid); // autopilot off, DAMPENERS ON, gyro/thrust cleared, drills off
+            _recovering = true;
+            _recoverResume = resumePhase;
+            _recoverStart = DateTime.UtcNow;
+        }
+
+        // Runs each tick while recovering: gyro-rotate the drone level/upright (dampeners holding it
+        // still), then re-acquire the failed phase from a safe, high start (the re-acquire routes
+        // through EngageCruise / DockRecover, which climb to a safe altitude before proceeding).
+        private void TickRecover(Colony colony, Mission m, DepositRecord deposit, IMyCubeGrid grid)
+        {
+            Vector3D pos = grid.GetPosition();
+            var rc = DroneUtil.FindRc(grid);
+            if (rc != null && !rc.DampenersOverride) rc.DampenersOverride = true;
+
+            double levelDot = _bore.Face(grid, grid.WorldMatrix.Up, Up(pos)); // gyro to upright; dampeners hold position
+            double vel = grid.Physics != null ? grid.Physics.LinearVelocity.Length() : 0;
+            bool level = levelDot > LevelDot && vel < DockSettleSpeed;
+            bool timedOut = (DateTime.UtcNow - _recoverStart).TotalSeconds > RecoverLevelTimeoutSecs;
+            if (!level && !timedOut) return; // keep leveling
+
+            _bore.Release(grid); // clear the gyro override before handing back to autopilot
+            _recovering = false;
+            MyLog.Default.WriteLineAndConsole(string.Format(
+                "[ColonyFramework] Mission {0}: recovered (level{1}), re-acquiring phase {2}",
+                m.Id, timedOut && !level ? " timeout" : "", _recoverResume));
+            switch (_recoverResume)
             {
                 case PhaseTransit: EngageTransit(grid, deposit); break;
                 case PhaseRetreat: if (EngageReturn(colony, grid)) _retreatSub = RetreatReturn; else CompleteMission(colony, m, grid); break;
-                case PhaseDock:    BeginDock(colony, m, grid, grid.GetPosition()); break;
+                case PhaseDock:
+                    Vector3D standoff;
+                    if (TryCoreStandoff(colony, out standoff)) EngageCruise(grid, standoff, (float)DockMoveSpeed, "core standoff");
+                    _dockSub = DockRecover;
+                    _dockStart = DateTime.UtcNow;
+                    break;
             }
         }
 
@@ -657,14 +712,8 @@ namespace ColonyFramework
         {
             Vector3D standoff;
             if (!TryCoreStandoff(colony, out standoff)) return false;
-            var rc = DroneUtil.FindRc(grid);
-            if (rc == null) return false;
-            rc.ClearWaypoints();
-            rc.AddWaypoint(standoff, "Colony core standoff");
-            rc.FlightMode = FlightMode.OneWay;
-            rc.SpeedLimit = TransitSpeedLimit;
-            rc.SetAutoPilotEnabled(true);
-            ResetLeg();
+            if (DroneUtil.FindRc(grid) == null) return false;
+            EngageCruise(grid, standoff, TransitSpeedLimit, "Colony core standoff");
             return true;
         }
 
@@ -898,13 +947,8 @@ namespace ColonyFramework
                 return;
             }
             MyLog.Default.WriteLineAndConsole(string.Format(
-                "[ColonyFramework] Mission {0}: dock retry {1}/{2} — {3}, returning to standoff", m.Id, _retries, MaxRetries, reason));
-            StabilizeDrone(grid); // autopilot off, DAMPENERS ON, gyro/thrust cleared, drills off — reliable safe state
-            Vector3D coreStandoff;
-            if (TryCoreStandoff(colony, out coreStandoff)) EngageAutopilot(grid, coreStandoff);
-            _dockSub = DockRecover;
-            _dockStart = DateTime.UtcNow;
-            ResetLeg();
+                "[ColonyFramework] Mission {0}: dock retry {1}/{2} — {3}, soft reset", m.Id, _retries, MaxRetries, reason));
+            BeginRecover(grid, PhaseDock); // stop + gyro-level, then climb to the core standoff and re-dock
         }
 
         // Connector locked: stop drills/overrides, restore dampers, begin draining cargo into the base.

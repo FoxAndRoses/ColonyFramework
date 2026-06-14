@@ -1,6 +1,9 @@
 using System.Collections.Generic;
 using Sandbox.ModAPI;
+using VRageMath;
+using VRage.Game.ModAPI;
 using MyPlanetElevation = Sandbox.ModAPI.Ingame.MyPlanetElevation;
+using MyShipConnectorStatus = Sandbox.ModAPI.Ingame.MyShipConnectorStatus;
 using IMyCubeGrid  = VRage.Game.ModAPI.IMyCubeGrid;
 using IMyCubeBlock = VRage.Game.ModAPI.IMyCubeBlock;
 using IMySlimBlock = VRage.Game.ModAPI.IMySlimBlock;
@@ -26,6 +29,44 @@ namespace ColonyFramework
             var ts = MyAPIGateway.TerminalActionsHelper.GetTerminalSystemForGrid(grid);
             if (ts != null) ts.GetBlocksOfType(drills);
             return drills;
+        }
+
+        // First connector on the grid (the drone's docking connector).
+        public static IMyShipConnector FindConnector(IMyCubeGrid grid)
+        {
+            var ts = MyAPIGateway.TerminalActionsHelper.GetTerminalSystemForGrid(grid);
+            if (ts == null) return null;
+            var cons = new List<IMyShipConnector>();
+            ts.GetBlocksOfType(cons);
+            return cons.Count > 0 ? cons[0] : null;
+        }
+
+        // Nearest free (not Connected) connector across the physical grid group of 'anyGridInGroup' —
+        // used to find an open base connector on the colony-core's structure.
+        public static IMyShipConnector FindFreeConnectorOnGroup(IMyCubeGrid anyGridInGroup, Vector3D nearTo)
+        {
+            var grids = new List<IMyCubeGrid>();
+            var group = anyGridInGroup.GetGridGroup(GridLinkTypeEnum.Physical);
+            if (group != null) group.GetGrids(grids);
+            if (grids.Count == 0) grids.Add(anyGridInGroup);
+
+            var cons = new List<IMyShipConnector>();
+            IMyShipConnector best = null;
+            double bestSq = double.MaxValue;
+            for (int g = 0; g < grids.Count; g++)
+            {
+                var ts = MyAPIGateway.TerminalActionsHelper.GetTerminalSystemForGrid(grids[g]);
+                if (ts == null) continue;
+                cons.Clear();
+                ts.GetBlocksOfType(cons);
+                for (int i = 0; i < cons.Count; i++)
+                {
+                    if (cons[i].Status == MyShipConnectorStatus.Connected) continue;
+                    double sq = Vector3D.DistanceSquared(cons[i].GetPosition(), nearTo);
+                    if (sq < bestSq) { bestSq = sq; best = cons[i]; }
+                }
+            }
+            return best;
         }
 
         public static bool TryGetAltitude(IMyCubeGrid grid, out double altitude)

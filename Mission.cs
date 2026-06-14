@@ -26,6 +26,6 @@ namespace ColonyFramework
         [ProtoMember(4)] public long AssignedAssetId; // 0 = unassigned
         [ProtoMember(5)] public MissionStatus Status;
         [ProtoMember(6)] public long CreatedTick;
-        [ProtoMember(7)] public int Phase; // 0=Commission, 1=Transit, 2=StartBore, 3=Mining, 4=Retreat
+        [ProtoMember(7)] public int Phase; // 0=Commission, 1=Transit, 2=StartBore, 3=Mining, 4=Retreat, 5=Dock
     }
 }

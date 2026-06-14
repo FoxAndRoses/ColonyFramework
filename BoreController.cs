@@ -45,6 +45,72 @@ namespace ColonyFramework
             }
         }
 
+        // Gyro-only: rotate so 'aimAxis' points along 'targetDir' WITHOUT translating. Returns the
+        // alignment dot. Pair with ThrustAlong or Maneuver when facing and travel directions differ.
+        public double Face(IMyCubeGrid grid, Vector3D aimAxis, Vector3D targetDir)
+        {
+            return Align(grid, aimAxis, targetDir);
+        }
+
+        // Pilot controller for flying with inertial dampeners OFF — our own software dampers.
+        // It ALWAYS fully counters gravity, then adds a strong velocity term to track a target
+        // velocity toward 'toTarget' (eased to a stop). With no target it just hovers (brakes
+        // velocity + holds altitude), exactly like dampeners but controllable per axis.
+        // Returns the worst-direction thrust saturation: >1 means the drone physically can't make
+        // the commanded force in some direction (i.e. it's underpowered, not a tuning problem).
+        private const double VelGain = 0.6; // desired approach speed = distance * VelGain (capped at maxSpeed)
+        private const double VelKp   = 3.0; // acceleration per unit velocity error (firmer than before)
+        public double Maneuver(IMyCubeGrid grid, Vector3D toTarget, double maxSpeed, double stopTol)
+        {
+            if (grid.Physics == null) return 0;
+            double dist = toTarget.Length();
+            Vector3D dir = dist > 1e-3 ? toTarget / dist : Vector3D.Zero;
+            double desiredSpeed = dist <= stopTol ? 0.0 : System.Math.Min(maxSpeed, dist * VelGain);
+            Vector3D velErr = dir * desiredSpeed - (Vector3D)grid.Physics.LinearVelocity;
+
+            float interference;
+            Vector3D g = MyAPIGateway.Physics.CalculateNaturalGravityAt(grid.GetPosition(), out interference);
+            Vector3D accel = velErr * VelKp - g;             // track velocity + FULL gravity compensation
+            return ApplyForce(grid, accel * grid.Physics.Mass);
+        }
+
+        // Distributes a desired world force across thrusters. Per thrust direction the commanded
+        // component is SHARED across all co-directional thrusters (override = comp / total-max-in-dir),
+        // so the summed thrust equals the command — not N× it. Returns the max (needed/available)
+        // ratio across directions: >1 = saturated (underpowered) in that direction.
+        private readonly Dictionary<Vector3I, double> _dirMax = new Dictionary<Vector3I, double>();
+        private double ApplyForce(IMyCubeGrid grid, Vector3D force)
+        {
+            var ts = MyAPIGateway.TerminalActionsHelper.GetTerminalSystemForGrid(grid);
+            if (ts == null) return 0;
+            var thrusters = new List<IMyThrust>();
+            ts.GetBlocksOfType(thrusters);
+
+            _dirMax.Clear();
+            for (int i = 0; i < thrusters.Count; i++)
+            {
+                var d = thrusters[i].GridThrustDirection;
+                double cur; _dirMax.TryGetValue(d, out cur);
+                _dirMax[d] = cur + thrusters[i].MaxEffectiveThrust;
+            }
+
+            double worstSat = 0;
+            for (int i = 0; i < thrusters.Count; i++)
+            {
+                var t = thrusters[i];
+                double comp = Vector3D.Dot(force, t.WorldMatrix.Backward);
+                double total; _dirMax.TryGetValue(t.GridThrustDirection, out total);
+                if (comp > 0 && total > 0)
+                {
+                    double ratio = comp / total;
+                    if (ratio > worstSat) worstSat = ratio;
+                    t.ThrustOverridePercentage = MathHelper.Clamp((float)ratio, 0f, 1f);
+                }
+                else t.ThrustOverridePercentage = 0f;
+            }
+            return worstSat;
+        }
+
         public void Release(IMyCubeGrid grid)
         {
             var ts = MyAPIGateway.TerminalActionsHelper.GetTerminalSystemForGrid(grid);

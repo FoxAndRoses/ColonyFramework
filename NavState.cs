@@ -27,6 +27,10 @@ namespace ColonyFramework
         public Vector3D Forward, Up, GravityUp;
         public double LevelDot;       // grid Up vs anti-gravity (1 = perfectly upright)
 
+        // MassState — TRUE physical mass incl. cargo (Physics.Mass under-reports a loaded grid,
+        // which made the loaded descent under-thrust and never brake).
+        public double Mass;
+
         // AltitudeState
         public bool AltValid;         // planet elevation readable (false in space)
         public double Agl;            // metres above surface
@@ -46,6 +50,10 @@ namespace ColonyFramework
             Vector3D g = MyAPIGateway.Physics.CalculateNaturalGravityAt(Com, out interference);
             GravityUp = g.LengthSquared() > 0.01 ? -Vector3D.Normalize(g) : Up; // space: no gravity frame, fall back to ship up
             LevelDot = Vector3D.Dot(Up, GravityUp);
+
+            Mass = grid.Physics.Mass;
+            var sm = rc.CalculateShipMass();           // accurate total mass incl. cargo
+            if (sm.PhysicalMass > 0) Mass = sm.PhysicalMass;
 
             Velocity = (Vector3D)grid.Physics.LinearVelocity;
             Speed = Velocity.Length();

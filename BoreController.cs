@@ -104,9 +104,12 @@ namespace ColonyFramework
                 {
                     double ratio = comp / total;
                     if (ratio > worstSat) worstSat = ratio;
-                    t.ThrustOverridePercentage = MathHelper.Clamp((float)ratio, 0f, 1f);
+                    // Command absolute Newtons (this thruster's share of the needed force), NOT a
+                    // percentage of MaxThrust — the percentage path under-delivered braking force.
+                    double share = comp * (t.MaxEffectiveThrust / total);
+                    t.ThrustOverride = (float)System.Math.Min(share, t.MaxEffectiveThrust);
                 }
-                else t.ThrustOverridePercentage = 0f;
+                else t.ThrustOverride = 0f;
             }
             return worstSat;
         }
@@ -129,7 +132,7 @@ namespace ColonyFramework
             float interference;
             Vector3D g = MyAPIGateway.Physics.CalculateNaturalGravityAt(grid.GetPosition(), out interference);
             double gMag = g.Length();
-            double mass = grid.Physics.Mass;
+            double mass = nav.Mass > 0 ? nav.Mass : grid.Physics.Mass; // TRUE mass incl. cargo
 
             double vErr = nav.VerticalError(targetPos);          // signed, along up
             Vector3D hErrVec = nav.HorizontalTo(targetPos);

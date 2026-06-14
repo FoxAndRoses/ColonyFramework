@@ -904,17 +904,10 @@ namespace ColonyFramework
                 // horizontal drift can't block completion and the pilot can't sink past (it climbs
                 // back). Fixes the old "stuck 5.5 m short on blended 3D distance" retry loop.
                 _bore.FaceHold(grid, dFwd, -bFwd, AlignHoldDot);
-                double vErr = _nav.VerticalError(bPos);                 // + = connector altitude is above us
-                Vector3D target = _nav.ConnectorPos + _nav.GravityUp * vErr; // straight to connector altitude, hold horizontal
-                double dsat = _bore.Navigate(grid, _nav, target, DockDescendSpeed * _dockSpeedScale, AltDeadband, NavVelDeadband);
-                Narrate(m, "dock/descend", bPos, dsat);
-                if ((DateTime.UtcNow - _lastDescendDbg).TotalSeconds >= 3)
-                {
-                    _lastDescendDbg = DateTime.UtcNow;
-                    MyLog.Default.WriteLineAndConsole(string.Format(
-                        "[ColonyFramework] Mission {0}: descend-ctl vErr={1:F1} vCap={2:F2} vDes={3:F2} vAct={4:F2} g={5:F1} maxSpd={6:F2} sat={7:F2}",
-                        m.Id, _bore.DbgVErr, _bore.DbgVCap, _bore.DbgVDes, _bore.DbgVAct, _bore.DbgGMag, DockDescendSpeed * _dockSpeedScale, dsat));
-                }
+                double vErr = _nav.VerticalError(bPos);                 // + = connector is ABOVE us (too low), - = below us (too high)
+
+                // At connector altitude AND settled (held steady a moment) -> done. Lineup then does
+                // the final gyro alignment before the reverse.
                 if (System.Math.Abs(vErr) <= AltDeadband && _nav.Speed < NavSettleSpeed)
                 {
                     _retries = 0;
@@ -923,7 +916,24 @@ namespace ColonyFramework
                     MyLog.Default.WriteLineAndConsole(string.Format(
                         "[ColonyFramework] Mission {0}: at connector altitude (vErr {1:F1} m), lining up on axis", m.Id, vErr));
                 }
-                else if (DockWatch(System.Math.Abs(vErr))) { DockFallback(colony, m, grid, "dock descend stuck"); return; }
+                else
+                {
+                    // Failsafe acquisition: drive ONLY the vertical axis to the connector altitude.
+                    // Overshot below (vErr>0): the target is above us, so the pilot fires up to BUMP
+                    // back up and hold; too high (vErr<0): it eases down. Either way it must SETTLE
+                    // inside the deadband before completing, so it can't blow straight through.
+                    Vector3D target = _nav.ConnectorPos + _nav.GravityUp * vErr; // altitude-matched, hold horizontal
+                    double dsat = _bore.Navigate(grid, _nav, target, DockDescendSpeed * _dockSpeedScale, AltDeadband, NavVelDeadband);
+                    Narrate(m, vErr > AltDeadband ? "dock/bumpup" : "dock/descend", bPos, dsat);
+                    if ((DateTime.UtcNow - _lastDescendDbg).TotalSeconds >= 3)
+                    {
+                        _lastDescendDbg = DateTime.UtcNow;
+                        MyLog.Default.WriteLineAndConsole(string.Format(
+                            "[ColonyFramework] Mission {0}: descend-ctl vErr={1:F1} vCap={2:F2} vDes={3:F2} vAct={4:F2} g={5:F1} mass={6:F0} maxSpd={7:F2} sat={8:F2}",
+                            m.Id, _bore.DbgVErr, _bore.DbgVCap, _bore.DbgVDes, _bore.DbgVAct, _bore.DbgGMag, _nav.Mass, DockDescendSpeed * _dockSpeedScale, dsat));
+                    }
+                    if (DockWatch(System.Math.Abs(vErr))) { DockFallback(colony, m, grid, "dock descend stuck"); return; }
+                }
             }
             else if (_dockSub == DockLineup || _dockSub == DockReverse)
             {

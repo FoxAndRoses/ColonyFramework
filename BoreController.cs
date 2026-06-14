@@ -120,6 +120,7 @@ namespace ColonyFramework
         // moves. Returns worst-axis thrust saturation (>1 = physically underpowered).
         private const double ApproachGain = 0.8; // desired axis speed = error * gain, capped at maxSpeed
         private const double NavKp        = 5.0; // velocity-tracking gain (firmer than Maneuver — holds the speed cap)
+        private const double DescentSafety = 0.4; // fraction of theoretical brake distance used (margin for thruster lag)
         public double Navigate(IMyCubeGrid grid, NavState nav, Vector3D targetPos,
                                double maxSpeed, double posDeadband, double velDeadband)
         {
@@ -141,8 +142,11 @@ namespace ColonyFramework
             double vCap = maxSpeed;
             if (vErr < -posDeadband)
             {
+                // Only descend as fast as we can actually arrest before the target. Use a fraction of
+                // the theoretical brake distance (DescentSafety) as margin for thruster spin-up lag,
+                // so it never outruns its own braking and sinks past the connector.
                 double brakeDecel = mass > 0 ? UpThrust(grid, up) / mass - gMag : 0; // net up accel available
-                double safe = brakeDecel > 0.2 ? System.Math.Sqrt(2.0 * brakeDecel * (-vErr)) : 0.2;
+                double safe = brakeDecel > 0.2 ? System.Math.Sqrt(2.0 * brakeDecel * DescentSafety * (-vErr)) : 0.2;
                 vCap = System.Math.Min(maxSpeed, safe);
             }
 

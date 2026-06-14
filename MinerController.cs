@@ -40,7 +40,9 @@ namespace ColonyFramework
         private const int RetreatLevel  = 1; // pitch to horizontal/level before turning to head home
         private const int RetreatReturn = 2; // autopilot to the colony-core standoff
 
-        private const float  TransitSpeedLimit  = 25f;
+        private const float  TransitSpeedLimit  = 25f; // careful cap used near the base / destination
+        private const float  CruiseSpeedLimit   = 70f; // fast cruise in open air between base and deposit
+        private const double NearBaseSlowDist   = 150.0; // within this of the base OR the destination, drop to the careful cap
         private const double ArriveDistance     = 15.0;
         private const double TransitTimeoutSecs = 150.0; // autopilot leg must arrive within this or it's aborted
         private const double ReturnTimeoutSecs  = 150.0; // same for the return-home autopilot leg
@@ -86,7 +88,7 @@ namespace ColonyFramework
         private const double DockArriveTol   = 3.0;  // arrival tolerance at the staging / altitude points
         private const double DockSettleSpeed = 0.5;  // m/s "settled" threshold before advancing a leg
         private const double DockMaxSafeSpeed = 12.0; // m/s — if the dampeners-off controller runs away, panic-stop
-        private const double DockDescendSpeed = 1.5; // m/s cap for the dampers-off dock pilot (descend/lineup/reverse)
+        private const double DockDescendSpeed = 1.0; // base m/s cap for the dampers-off dock pilot (scaled down each retry)
         // Per-axis pilot deadbands (dampers-off dock): inside these the drone just holds — no hunting.
         private const double AltDeadband     = 0.5;   // m vertical tolerance to count as "at connector altitude"
         private const double NavVelDeadband  = 0.2;   // m/s velocity tolerance the pilot ignores (anti-oscillation)
@@ -142,6 +144,7 @@ namespace ColonyFramework
         private int _recoverResume;   // the phase to re-acquire once leveled
         private DateTime _recoverStart;
         private DateTime _lastGroundAvoid; // throttle for mid-cruise climb re-engages
+        private double _dockSpeedScale = 1.0; // soft failsafe: each dock retry crawls slower
         private int _boreIndex;
         private bool _oriented;
         private DateTime _subStart;
@@ -252,7 +255,7 @@ namespace ColonyFramework
         {
             DroneUtil.ReleaseGrid(grid);
             Vector3D standoff = NavMath.ComputeStandoff(deposit.Position, grid.GetPosition());
-            EngageCruise(grid, standoff, TransitSpeedLimit, "Deposit " + deposit.Id + " standoff");
+            EngageCruise(grid, standoff, CruiseSpeedLimit, "Deposit " + deposit.Id + " standoff");
         }
 
         // Climb-then-cruise RC route used for the long transit/return legs: climb STRAIGHT UP to a
@@ -302,6 +305,7 @@ namespace ColonyFramework
                 // drone without writing the property every tick (which fights autopilot).
                 var rc2 = DroneUtil.FindRc(grid);
                 if (rc2 != null && !rc2.DampenersOverride) rc2.DampenersOverride = true;
+                if (rc2 != null) rc2.SpeedLimit = CruiseSpeed(colony, grid.GetPosition(), standoff); // fast in open air, slow near base/deposit
                 if (NeedsClimb(grid, m, "transit")) { EngageTransit(grid, deposit); return; } // active ground avoidance
                 Narrate(m, "transit", standoff);
                 string fail = LegOk(dist, TransitTimeoutSecs, "transit");
@@ -679,6 +683,7 @@ namespace ColonyFramework
             {
                 var rcd = DroneUtil.FindRc(grid);
                 if (rcd != null && !rcd.DampenersOverride) rcd.DampenersOverride = true; // heal only if off (autopilot needs it to brake)
+                if (rcd != null) rcd.SpeedLimit = CruiseSpeed(colony, pos, coreStandoff); // fast in open air, slow near base
                 if (NeedsClimb(grid, m, "return")) { EngageReturn(colony, grid); return; } // active ground avoidance
                 Narrate(m, "return", coreStandoff);
                 string fail = LegOk(rdist, ReturnTimeoutSecs, "return");
@@ -749,8 +754,29 @@ namespace ColonyFramework
             Vector3D standoff;
             if (!TryCoreStandoff(colony, out standoff)) return false;
             if (DroneUtil.FindRc(grid) == null) return false;
-            EngageCruise(grid, standoff, TransitSpeedLimit, "Colony core standoff");
+            EngageCruise(grid, standoff, CruiseSpeedLimit, "Colony core standoff");
             return true;
+        }
+
+        private bool TryCorePos(Colony colony, out Vector3D corePos)
+        {
+            corePos = Vector3D.Zero;
+            long coreId = colony.State.CoreEntityId;
+            if (coreId == 0) return false;
+            var core = MyAPIGateway.Entities.GetEntityById(coreId);
+            if (core == null) return false;
+            corePos = core.GetPosition();
+            return true;
+        }
+
+        // Fast cruise in open air; drop to the careful cap within NearBaseSlowDist of the base OR of
+        // the destination, so it never barrels into the base structure or overshoots the deposit.
+        private float CruiseSpeed(Colony colony, Vector3D pos, Vector3D target)
+        {
+            Vector3D corePos;
+            bool nearBase = TryCorePos(colony, out corePos) && Vector3D.Distance(pos, corePos) < NearBaseSlowDist;
+            bool nearDest = Vector3D.Distance(pos, target) < NearBaseSlowDist;
+            return (nearBase || nearDest) ? TransitSpeedLimit : CruiseSpeedLimit;
         }
 
         // A holding point ReturnStandoffHeight metres above the colony core block.
@@ -879,7 +905,7 @@ namespace ColonyFramework
                 _bore.FaceHold(grid, dFwd, -bFwd, AlignHoldDot);
                 double vErr = _nav.VerticalError(bPos);                 // + = connector altitude is above us
                 Vector3D target = _nav.ConnectorPos + _nav.GravityUp * vErr; // straight to connector altitude, hold horizontal
-                double dsat = _bore.Navigate(grid, _nav, target, DockDescendSpeed, AltDeadband, NavVelDeadband);
+                double dsat = _bore.Navigate(grid, _nav, target, DockDescendSpeed * _dockSpeedScale, AltDeadband, NavVelDeadband);
                 Narrate(m, "dock/descend", bPos, dsat);
                 if (System.Math.Abs(vErr) <= AltDeadband && _nav.Speed < NavSettleSpeed)
                 {
@@ -906,7 +932,7 @@ namespace ColonyFramework
                 if (_dockSub == DockLineup)
                 {
                     Vector3D target = bPos + bFwd * StageFwd;            // on-axis staging point, connector altitude
-                    double lsat = _bore.Navigate(grid, _nav, target, DockDescendSpeed, DockLateralTol, NavVelDeadband);
+                    double lsat = _bore.Navigate(grid, _nav, target, DockDescendSpeed * _dockSpeedScale, DockLateralTol, NavVelDeadband);
                     double distH = _nav.HorizontalTo(target).Length();
                     Narrate(m, "dock/lineup", target, lsat);
                     if (distH <= DockLateralTol && _nav.Speed < NavSettleSpeed)
@@ -928,7 +954,7 @@ namespace ColonyFramework
                     double lateral = (rel - bFwd * along - _nav.GravityUp * Vector3D.Dot(rel, _nav.GravityUp)).Length();
                     if (lateral > DockLateralTol * 3) { _dockSub = DockLineup; ResetLeg(); return; }
 
-                    double rsat = _bore.Navigate(grid, _nav, bPos, CrawlSpeedFar, 0.05, NavVelDeadband); // drive onto the connector; magnet snaps at Connectable
+                    double rsat = _bore.Navigate(grid, _nav, bPos, CrawlSpeedFar * _dockSpeedScale, 0.05, NavVelDeadband); // drive onto the connector; magnet snaps at Connectable
                     double distH = _nav.HorizontalTo(bPos).Length();
                     Narrate(m, "dock/reverse", bPos, rsat);
                     if (DockWatch(distH)) { DockFallback(colony, m, grid, "dock reverse stuck"); return; }
@@ -965,8 +991,9 @@ namespace ColonyFramework
                 FailMission(colony, m, grid, reason);
                 return;
             }
+            _dockSpeedScale = System.Math.Max(0.25, _dockSpeedScale * 0.6); // soft failsafe: retry the dock slower
             MyLog.Default.WriteLineAndConsole(string.Format(
-                "[ColonyFramework] Mission {0}: dock retry {1}/{2} — {3}, soft reset", m.Id, _retries, MaxRetries, reason));
+                "[ColonyFramework] Mission {0}: dock retry {1}/{2} — {3}, soft reset (speed x{4:F2})", m.Id, _retries, MaxRetries, reason, _dockSpeedScale));
             BeginRecover(grid, PhaseDock); // stop + gyro-level, then climb to the core standoff and re-dock
         }
 

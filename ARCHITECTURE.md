@@ -66,9 +66,11 @@ Data → Domain → Services → Host
 | `ResourceSnapshot.cs` | Runtime-only (non-persisted) ore/ingot/component totals for one colony; recomputed by `ResourceTracker` each cycle. |
 | `ResourceTracker.cs` | Scans the physical grid group rooted at the colony core, filtered to grids owned by the colony's owner key; accumulates items into a `ResourceSnapshot`. |
 | `NavMath.cs` | Stateless navigation helpers: `ComputeStandoff` picks a 120 m standoff point above a deposit, gravity-aware (anti-gravity direction on a planet, approach vector in space). |
-| `DispatchService.cs` | Chat-driven dispatch PoC: finds the first Assigned (or stuck InProgress) mission, releases landing gear/connectors, and sends the RC autopilot to the deposit standoff. |
-| `BoreController.cs` | Direct flight control for the bore phase (autopilot OFF): damped gyro P-D loop (1 Hz gain, 0.6 damping, ±1 rpm clamp) for orientation hold; bang-bang thrust override for velocity-limited advance. |
-| `DroneExecutor.cs` | Phase-state machine ticked at ~6 Hz per active colony. Drives Transit → StartBore → Boring → Retreating; watchdogs for stuck bores (20 s no progress) and bore timeout (240 s); marks missions Complete and assets Idle on successful retreat. Exposes `AbortAll` (hard stop) and `RecallAll` (graceful retreat). |
+| `DroneUtil.cs` | Stateless grid/power helpers shared by the execution services: find RC/drills, cargo fill, reactor/battery checks, battery stored+output sum, the commissioning spike toggle, planet altitude, and grid release (gear unlock + connector disconnect). |
+| `DispatchService.cs` | Chat-driven dispatch initiator: finds the first Assigned (or stuck InProgress) mission, validates the asset, and hands off to the executor's Commission phase (does NOT release/fly — the drone stays put until commissioning passes). |
+| `BoreController.cs` | Direct flight control (autopilot OFF): damped gyro P-D loop (1.0 gain, 1.5 damping, ±1 rpm clamp) for orientation hold; `Drive` (align + velocity-limited advance), `ThrustAlong` (thrust along a world dir without reorienting), `Release`. |
+| `MinerController.cs` | Executes ONE drone's mission (instance per mission): Commission (power self-test, refuse < 10 min runtime) → Transit (RC autopilot to standoff) → StartBore (alignment check) → Mining (+-pattern bore: Center/N/S/E/W to ore-depth+1 m, drills on, exit on pattern-complete or cargo ≥ 80 %) → Retreat (climb to standoff, complete). Flip guard, stuck/timeout watchdogs. |
+| `DroneExecutor.cs` | Coordinator: owns one `MinerController` per in-progress Mine mission, routes ticks, prunes finished controllers. Exposes `AbortAll` (hard stop), `RecallAll` (graceful retreat), `ReleaseControls` (clear stale overrides on register). |
 | `ColonyCommands.cs` | Chat command handler for all `/colony` commands: `info`, `scan`, `missions`, `register`, `assets`, `resources`, `dispatch`, `abort`, `recall`. |
 
 ### Host layer

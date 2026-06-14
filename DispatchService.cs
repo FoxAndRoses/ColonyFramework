@@ -31,7 +31,7 @@ namespace ColonyFramework
             var grid = MyAPIGateway.Entities.GetEntityById(mission.AssignedAssetId) as IMyCubeGrid;
             if (grid == null) return "asset grid not found for mission " + mission.Id;
 
-            if (FindRemoteControl(grid) == null) return "asset '" + grid.DisplayName + "' has no Remote Control";
+            if (DroneUtil.FindRc(grid) == null) return "asset '" + grid.DisplayName + "' has no Remote Control";
 
             colony.Missions.SetInProgress(mission.Id);
             mission.Phase = PhaseCommission;
@@ -41,15 +41,6 @@ namespace ColonyFramework
                 grid.DisplayName, deposit.Id, deposit.OreType);
             MyLog.Default.WriteLineAndConsole("[ColonyFramework] " + msg);
             return msg;
-        }
-
-        private IMyRemoteControl FindRemoteControl(IMyCubeGrid grid)
-        {
-            var ts = MyAPIGateway.TerminalActionsHelper.GetTerminalSystemForGrid(grid);
-            if (ts == null) return null;
-            var rcs = new List<IMyRemoteControl>();
-            ts.GetBlocksOfType(rcs);
-            return rcs.Count > 0 ? rcs[0] : null;
         }
     }
 }

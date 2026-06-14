@@ -102,6 +102,7 @@ namespace ColonyFramework
 
         private readonly BoreController _bore = new BoreController();
 
+        private bool _started; // first Advance seen (distinguishes a fresh/resumed controller)
         private bool _commissionStarted;
         private DateTime _commissionStart;
         private DateTime _boreStart;
@@ -130,6 +131,7 @@ namespace ColonyFramework
 
         public void Advance(Colony colony, Mission m, DepositRecord deposit, IMyCubeGrid grid)
         {
+            if (!_started) { _started = true; OnResume(colony, m, deposit, grid); }
             try
             {
                 switch (m.Phase)
@@ -145,6 +147,32 @@ namespace ColonyFramework
             catch (Exception e)
             {
                 MyLog.Default.WriteLineAndConsole("[ColonyFramework] Miner error mission " + m.Id + ": " + e.Message);
+            }
+        }
+
+        // First tick of a fresh controller. A controller is created on dispatch (Phase=Commission,
+        // handled normally) OR when a mission already in flight resumes after a world reload — in
+        // which case every watchdog clock is still at default(DateTime) (year 0001), which would
+        // make the very first LegOk read ~2000 years elapsed and instantly "time out". Give every
+        // clock a fresh start and re-acquire the in-flight leg from a known-safe hover.
+        private void OnResume(Colony colony, Mission m, DepositRecord deposit, IMyCubeGrid grid)
+        {
+            var now = DateTime.UtcNow;
+            _commissionStart = _boreStart = _dockStart = _subStart = _progressTime = now;
+            _legStart = _legProgressTime = _lastDockLog = now;
+            _legMinDist = double.MaxValue;
+            if (m.Phase == PhaseCommission) return; // brand-new mission: dispatch drives commissioning
+
+            MyLog.Default.WriteLineAndConsole(string.Format(
+                "[ColonyFramework] Mission {0}: resumed in phase {1}, re-acquiring", m.Id, m.Phase));
+            StabilizeDrone(grid);
+            switch (m.Phase)
+            {
+                case PhaseTransit:   EngageTransit(grid, deposit); break;
+                case PhaseStartBore: break; // quick alignment check; fresh clocks are enough
+                case PhaseMining:    BeginRetreat(m, grid, "resumed after reload"); break; // safest: back out and return
+                case PhaseRetreat:   if (EngageReturn(colony, grid)) _retreatSub = RetreatReturn; else CompleteMission(colony, m, grid); break;
+                case PhaseDock:      BeginDock(colony, m, grid, grid.GetPosition()); break;
             }
         }
 
@@ -670,9 +698,14 @@ namespace ColonyFramework
 
             Vector3D bPos = baseCon.GetPosition();
             Vector3D bFwd = baseCon.WorldMatrix.Forward;     // outward face (flip to Backward if it docks wrong side)
-            Vector3D dPos = droneCon.GetPosition();          // DRONE CONNECTOR — the distance reference
+            Vector3D dPos = droneCon.GetPosition();          // DRONE CONNECTOR — reference for the final reverse
             Vector3D dFwd = droneCon.WorldMatrix.Forward;
             Vector3D vel = grid.Physics != null ? (Vector3D)grid.Physics.LinearVelocity : Vector3D.Zero;
+            // Autopilot drives the RC block (not the connector), so the over/down legs must gate on
+            // the RC reaching its waypoint — gating on the connector parks it one RC↔connector
+            // offset short forever (it never reaches DockArriveTol). The final reverse stays
+            // connector-referenced and closed-loop, so it self-corrects that offset.
+            Vector3D rcPos; { var r = DroneUtil.FindRc(grid); rcPos = r != null ? r.GetPosition() : dPos; }
 
             Vector3D up = Up(dPos);
 
@@ -680,7 +713,7 @@ namespace ColonyFramework
             {
                 // Autopilot (DAMPENERS ON) flies over the connector to the staging point.
                 Vector3D over = bPos + bFwd * StageFwd + up * StageUp;
-                double dist = Vector3D.Distance(dPos, over);
+                double dist = Vector3D.Distance(rcPos, over); // gate on the RC — autopilot drives it
                 DockTelemetry(m, "over", dist, vel.Length(), Vector3D.Dot(dFwd, -bFwd), 0);
                 if (dist <= DockArriveTol && vel.Length() < DockSettleSpeed)
                 {
@@ -696,7 +729,7 @@ namespace ColonyFramework
             {
                 // Autopilot (DAMPENERS ON) descends to the connector's altitude and stabilizes.
                 Vector3D atAltitude = bPos + bFwd * StageFwd;
-                double dist = Vector3D.Distance(dPos, atAltitude);
+                double dist = Vector3D.Distance(rcPos, atAltitude); // gate on the RC — autopilot drives it
                 DockTelemetry(m, "down", dist, vel.Length(), Vector3D.Dot(dFwd, -bFwd), 0);
                 if (dist <= DockArriveTol && vel.Length() < DockSettleSpeed)
                 {

@@ -82,7 +82,7 @@ namespace ColonyFramework
         private const double DockArriveTol   = 3.0;  // arrival tolerance at the staging / altitude points
         private const double DockSettleSpeed = 0.5;  // m/s "settled" threshold before advancing a leg
         private const double DockMaxSafeSpeed = 12.0; // m/s — if the dampeners-off controller runs away, panic-stop
-        private const double DockDescendSpeed = 2.0; // m/s straight-down descent to connector height
+        private const double DockDescendSpeed = 1.0; // m/s straight-down descent to connector height (gentle — limits momentum so it doesn't sink past)
         private const double DockAlignDot    = 0.98; // drone connector forward vs -base forward
         private const double CrawlFarDist    = 10.0; // > this: crawl fast tier
         private const double CrawlMidDist    = 5.0;  // > this: crawl mid tier (else near tier)
@@ -91,6 +91,7 @@ namespace ColonyFramework
         private const double CrawlSpeedNear  = 0.25; // m/s   (<5 m, until bump)
         private const double DockLateralTol  = 0.3;  // m off the connector axis we tolerate before reversing straight in
         private const double DockRunawayMargin = 4.0; // m past closest approach on a dampers-off dock leg = overshoot → recover
+        private const double DockBelowTol     = 1.5;  // m below connector altitude tolerated before climbing back up
         private const double DockUnloadSecs  = 30.0; // max time to drain cargo once locked before completing anyway
         private const double DockTimeoutSecs = 180;  // give up → complete near base
 
@@ -794,9 +795,11 @@ namespace ColonyFramework
                 Vector3D target = bPos + bFwd * StageFwd; // connector altitude, still out in front
                 Vector3D to = target - dPos;
                 double dist = to.Length();
-                double sat = _bore.Maneuver(grid, to, DockDescendSpeed, 0.0);
+                double belowBy = Vector3D.Dot(bPos - dPos, up); // >0 = connector has sunk below the base connector
+                double sat = _bore.Maneuver(grid, to, DockDescendSpeed, 0.0); // Maneuver eases to the target — climbs back if below
                 DockTelemetry(m, "descend", dist, vel.Length(), Vector3D.Dot(dFwd, -bFwd), sat);
-                if (dist <= DockArriveTol && vel.Length() < DockSettleSpeed)
+                // Only settle once at connector altitude (not still below it) and stopped.
+                if (dist <= DockArriveTol && belowBy <= DockBelowTol && vel.Length() < DockSettleSpeed)
                 {
                     _retries = 0; // sub-state advanced — progress
                     _dockSub = DockLineup;
@@ -815,6 +818,19 @@ namespace ColonyFramework
                 if (vel.Length() > DockMaxSafeSpeed) { DockFallback(colony, m, grid, string.Format("dock overspeed ({0:F0} m/s)", vel.Length())); return; }
                 if (droneCon.Status == MyShipConnectorStatus.Connected) { BeginUnload(m, grid); return; }
                 if (droneCon.Status == MyShipConnectorStatus.Connectable) droneCon.Connect();
+
+                // Overshoot-below guard: if the connector has dropped below connector altitude (e.g.
+                // momentum carried it down), go back to the descend stage to climb straight back up
+                // before continuing — never keep sinking toward the surface.
+                double belowBy = Vector3D.Dot(bPos - dPos, up);
+                if (belowBy > DockBelowTol)
+                {
+                    _dockSub = DockDescend;
+                    ResetLeg();
+                    MyLog.Default.WriteLineAndConsole(string.Format(
+                        "[ColonyFramework] Mission {0}: dropped {1:F1} m below connector, climbing back to altitude", m.Id, belowBy));
+                    return;
+                }
 
                 _bore.Face(grid, dFwd, -bFwd); // hold the drone connector aimed at the base connector
 

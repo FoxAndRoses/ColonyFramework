@@ -119,18 +119,34 @@ namespace ColonyFramework
         // off horizontally" no longer blocks, and altitude is actively held during lateral/axial
         // moves. Returns worst-axis thrust saturation (>1 = physically underpowered).
         private const double ApproachGain = 0.8; // desired axis speed = error * gain, capped at maxSpeed
+        private const double NavKp        = 5.0; // velocity-tracking gain (firmer than Maneuver — holds the speed cap)
         public double Navigate(IMyCubeGrid grid, NavState nav, Vector3D targetPos,
                                double maxSpeed, double posDeadband, double velDeadband)
         {
             if (grid.Physics == null || !nav.Valid) return 0;
             Vector3D up = nav.GravityUp;
+            float interference;
+            Vector3D g = MyAPIGateway.Physics.CalculateNaturalGravityAt(grid.GetPosition(), out interference);
+            double gMag = g.Length();
+            double mass = grid.Physics.Mass;
 
             double vErr = nav.VerticalError(targetPos);          // signed, along up
             Vector3D hErrVec = nav.HorizontalTo(targetPos);
             double hErr = hErrVec.Length();
             Vector3D hDir = hErr > 1e-3 ? hErrVec / hErr : Vector3D.Zero;
 
-            double vDes = System.Math.Abs(vErr) <= posDeadband ? 0.0 : Clamp(vErr * ApproachGain, -maxSpeed, maxSpeed);
+            // KNOW THYSELF: how hard can we brake a descent? Cap the descent speed to one we can
+            // actually arrest before the target (sqrt(2*decel*dist)) using the drone's real up-thrust
+            // capability — a weak drone descends slowly, a strong one fast, neither overshoots.
+            double vCap = maxSpeed;
+            if (vErr < -posDeadband)
+            {
+                double brakeDecel = mass > 0 ? UpThrust(grid, up) / mass - gMag : 0; // net up accel available
+                double safe = brakeDecel > 0.2 ? System.Math.Sqrt(2.0 * brakeDecel * (-vErr)) : 0.2;
+                vCap = System.Math.Min(maxSpeed, safe);
+            }
+
+            double vDes = System.Math.Abs(vErr) <= posDeadband ? 0.0 : Clamp(vErr * ApproachGain, -vCap, vCap);
             double hDes = hErr <= posDeadband ? 0.0 : System.Math.Min(maxSpeed, hErr * ApproachGain);
 
             double vAct = nav.VertSpeed;
@@ -141,14 +157,25 @@ namespace ColonyFramework
             double vVelErr = vDes - vAct; if (System.Math.Abs(vVelErr) < velDeadband) vVelErr = 0;
             double hVelErr = hDes - hAct; if (System.Math.Abs(hVelErr) < velDeadband) hVelErr = 0;
 
-            Vector3D accel = up * (vVelErr * VelKp)
-                           + hDir * (hVelErr * VelKp)
-                           - hDrift * VelKp;                     // kill sideways drift
-
-            float interference;
-            Vector3D g = MyAPIGateway.Physics.CalculateNaturalGravityAt(grid.GetPosition(), out interference);
+            Vector3D accel = up * (vVelErr * NavKp)
+                           + hDir * (hVelErr * NavKp)
+                           - hDrift * NavKp;                     // kill sideways drift
             accel -= g;                                          // full gravity compensation
-            return ApplyForce(grid, accel * grid.Physics.Mass);
+            return ApplyForce(grid, accel * mass);
+        }
+
+        // Total thrust (N) the grid can produce roughly along 'worldUp' — the drone's lift capability.
+        // Used to size a descent it can actually stop, and (later) a hover-capability check.
+        public double UpThrust(IMyCubeGrid grid, Vector3D worldUp)
+        {
+            var ts = MyAPIGateway.TerminalActionsHelper.GetTerminalSystemForGrid(grid);
+            if (ts == null) return 0;
+            var thr = new List<IMyThrust>();
+            ts.GetBlocksOfType(thr);
+            double sum = 0;
+            for (int i = 0; i < thr.Count; i++)
+                if (Vector3D.Dot(thr[i].WorldMatrix.Backward, worldUp) > 0.7) sum += thr[i].MaxEffectiveThrust;
+            return sum;
         }
 
         private static double Clamp(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }

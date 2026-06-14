@@ -320,11 +320,13 @@ namespace ColonyFramework
 
         // Throttled self-report: the drone narrating its awareness (pos/vel/orientation/altitude vs
         // target) for the current phase. One consistent telemetry line for every phase.
-        private void Narrate(Mission m, string phase, Vector3D target)
+        private void Narrate(Mission m, string phase, Vector3D target, double sat = -1)
         {
             if ((DateTime.UtcNow - _lastDockLog).TotalSeconds < 3) return;
             _lastDockLog = DateTime.UtcNow;
-            MyLog.Default.WriteLineAndConsole(_nav.Report(m.Id, phase, target));
+            string line = _nav.Report(m.Id, phase, target);
+            if (sat >= 0) line += string.Format(" thrustSat={0:F2}", sat);
+            MyLog.Default.WriteLineAndConsole(line);
         }
 
         // Resets the per-leg watchdog trackers. Call when an autopilot/move leg is (re)engaged.
@@ -877,8 +879,8 @@ namespace ColonyFramework
                 _bore.FaceHold(grid, dFwd, -bFwd, AlignHoldDot);
                 double vErr = _nav.VerticalError(bPos);                 // + = connector altitude is above us
                 Vector3D target = _nav.ConnectorPos + _nav.GravityUp * vErr; // straight to connector altitude, hold horizontal
-                _bore.Navigate(grid, _nav, target, DockDescendSpeed, AltDeadband, NavVelDeadband);
-                Narrate(m, "dock/descend", bPos);
+                double dsat = _bore.Navigate(grid, _nav, target, DockDescendSpeed, AltDeadband, NavVelDeadband);
+                Narrate(m, "dock/descend", bPos, dsat);
                 if (System.Math.Abs(vErr) <= AltDeadband && _nav.Speed < NavSettleSpeed)
                 {
                     _retries = 0;
@@ -904,9 +906,9 @@ namespace ColonyFramework
                 if (_dockSub == DockLineup)
                 {
                     Vector3D target = bPos + bFwd * StageFwd;            // on-axis staging point, connector altitude
-                    _bore.Navigate(grid, _nav, target, DockDescendSpeed, DockLateralTol, NavVelDeadband);
+                    double lsat = _bore.Navigate(grid, _nav, target, DockDescendSpeed, DockLateralTol, NavVelDeadband);
                     double distH = _nav.HorizontalTo(target).Length();
-                    Narrate(m, "dock/lineup", target);
+                    Narrate(m, "dock/lineup", target, lsat);
                     if (distH <= DockLateralTol && _nav.Speed < NavSettleSpeed)
                     {
                         _retries = 0;
@@ -926,9 +928,9 @@ namespace ColonyFramework
                     double lateral = (rel - bFwd * along - _nav.GravityUp * Vector3D.Dot(rel, _nav.GravityUp)).Length();
                     if (lateral > DockLateralTol * 3) { _dockSub = DockLineup; ResetLeg(); return; }
 
-                    _bore.Navigate(grid, _nav, bPos, CrawlSpeedFar, 0.05, NavVelDeadband); // drive onto the connector; magnet snaps at Connectable
+                    double rsat = _bore.Navigate(grid, _nav, bPos, CrawlSpeedFar, 0.05, NavVelDeadband); // drive onto the connector; magnet snaps at Connectable
                     double distH = _nav.HorizontalTo(bPos).Length();
-                    Narrate(m, "dock/reverse", bPos);
+                    Narrate(m, "dock/reverse", bPos, rsat);
                     if (DockWatch(distH)) { DockFallback(colony, m, grid, "dock reverse stuck"); return; }
                 }
             }

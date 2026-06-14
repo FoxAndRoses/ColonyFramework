@@ -73,6 +73,8 @@ namespace ColonyFramework
         private const double ReturnClearanceAlt   = 30.0; // climb to this (m above surface) out of the shaft before returning
         private const double ReturnStandoffHeight = 100.0; // hold this far above the colony core (high, so the return cruise clears terrain)
         private const double CruiseAltitudeAgl    = 100.0; // climb to >= this (m above surface) before cruising — ground-avoidance floor
+        private const double GroundAvoidAgl       = 40.0;  // mid-cruise: if AGL drops below this, climb back up (active ground avoidance)
+        private const double ClimbReengageSecs    = 3.0;   // throttle for the mid-cruise climb re-engage
         private const double RecoverLevelTimeoutSecs = 10.0; // max time to gyro-level during a soft reset before resuming anyway
 
         // Docking is connector-relative and uses the DRONE CONNECTOR (not the RC) as the distance
@@ -133,6 +135,7 @@ namespace ColonyFramework
         private bool _recovering;     // soft reset in progress: stop + gyro-level before resuming
         private int _recoverResume;   // the phase to re-acquire once leveled
         private DateTime _recoverStart;
+        private DateTime _lastGroundAvoid; // throttle for mid-cruise climb re-engages
         private int _boreIndex;
         private bool _oriented;
         private DateTime _subStart;
@@ -261,6 +264,20 @@ namespace ColonyFramework
             ResetLeg();
         }
 
+        // Active ground avoidance for autopilot legs: a straight/diagonal route between points of
+        // different elevation can still dip toward terrain. If the drone is mid-cruise below the
+        // floor AGL, signal the caller to re-engage the climb-then-cruise (throttled) so it pulls up.
+        private bool NeedsClimb(IMyCubeGrid grid, Mission m, string leg)
+        {
+            double agl;
+            if (!DroneUtil.TryGetAltitude(grid, out agl) || agl >= GroundAvoidAgl) return false;
+            if ((DateTime.UtcNow - _lastGroundAvoid).TotalSeconds < ClimbReengageSecs) return false;
+            _lastGroundAvoid = DateTime.UtcNow;
+            MyLog.Default.WriteLineAndConsole(string.Format(
+                "[ColonyFramework] Mission {0}: {1} too low ({2:F0} m AGL) — climbing", m.Id, leg, agl));
+            return true;
+        }
+
         private void TickTransit(Colony colony, Mission m, DepositRecord deposit, IMyCubeGrid grid)
         {
             Vector3D standoff = NavMath.ComputeStandoff(deposit.Position, grid.GetPosition());
@@ -273,13 +290,15 @@ namespace ColonyFramework
                 // drone without writing the property every tick (which fights autopilot).
                 var rc2 = DroneUtil.FindRc(grid);
                 if (rc2 != null && !rc2.DampenersOverride) rc2.DampenersOverride = true;
+                if (NeedsClimb(grid, m, "transit")) { EngageTransit(grid, deposit); return; } // active ground avoidance
                 if ((DateTime.UtcNow - _lastDockLog).TotalSeconds >= 3)
                 {
                     _lastDockLog = DateTime.UtcNow;
                     double spd = grid.Physics != null ? grid.Physics.LinearVelocity.Length() : 0;
+                    double agl; bool ok = DroneUtil.TryGetAltitude(grid, out agl);
                     MyLog.Default.WriteLineAndConsole(string.Format(
-                        "[ColonyFramework] Mission {0}: transit dist={1:F0} vel={2:F1} damp={3}",
-                        m.Id, dist, spd, rc2 != null && rc2.DampenersOverride));
+                        "[ColonyFramework] Mission {0}: transit dist={1:F0} vel={2:F1} agl={3} damp={4}",
+                        m.Id, dist, spd, ok ? agl.ToString("F0") : "?", rc2 != null && rc2.DampenersOverride));
                 }
                 string fail = LegOk(dist, TransitTimeoutSecs, "transit");
                 if (fail != null) RetryOrFail(colony, m, deposit, grid, fail);
@@ -645,6 +664,16 @@ namespace ColonyFramework
             {
                 var rcd = DroneUtil.FindRc(grid);
                 if (rcd != null && !rcd.DampenersOverride) rcd.DampenersOverride = true; // heal only if off (autopilot needs it to brake)
+                if (NeedsClimb(grid, m, "return")) { EngageReturn(colony, grid); return; } // active ground avoidance
+                if ((DateTime.UtcNow - _lastDockLog).TotalSeconds >= 3)
+                {
+                    _lastDockLog = DateTime.UtcNow;
+                    double rspd = grid.Physics != null ? grid.Physics.LinearVelocity.Length() : 0;
+                    double ragl; bool rok = DroneUtil.TryGetAltitude(grid, out ragl);
+                    MyLog.Default.WriteLineAndConsole(string.Format(
+                        "[ColonyFramework] Mission {0}: return dist={1:F0} vel={2:F1} agl={3} damp={4}",
+                        m.Id, rdist, rspd, rok ? ragl.ToString("F0") : "?", rcd != null && rcd.DampenersOverride));
+                }
                 string fail = LegOk(rdist, ReturnTimeoutSecs, "return");
                 if (fail != null) RetryOrFail(colony, m, deposit, grid, fail);
                 return; // still flying home (or retrying)

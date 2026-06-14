@@ -86,6 +86,7 @@ namespace ColonyFramework
         private const double CrawlSpeedFar   = 2.0;  // m/s   (>10 m)
         private const double CrawlSpeedMid   = 1.0;  // m/s   (5–10 m)
         private const double CrawlSpeedNear  = 0.25; // m/s   (<5 m, until bump)
+        private const double DockLateralTol  = 0.3;  // m off the connector axis we tolerate before reversing straight in
         private const double DockTimeoutSecs = 180;  // give up → complete near base
 
         private const double CargoThreshold     = 0.80;
@@ -786,22 +787,46 @@ namespace ColonyFramework
                 if (droneCon.Status == MyShipConnectorStatus.Connectable) droneCon.Connect();
 
                 _bore.Face(grid, dFwd, -bFwd); // aim the drone connector at the base connector
-                Vector3D to = bPos - dPos;
-                double dist = to.Length();
-                double sp = dist > CrawlFarDist ? CrawlSpeedFar
-                          : dist > CrawlMidDist ? CrawlSpeedMid : CrawlSpeedNear;
-                double sat = _bore.Maneuver(grid, to, sp, 0.0); // drive onto the connector; magnet snaps at Connectable
-                DockTelemetry(m, "reverse", dist, vel.Length(), Vector3D.Dot(dFwd, -bFwd), sat);
+
+                // Approach ALONG the base connector's axis, never straight at it. The autopilot
+                // over/down legs leave the drone connector laterally off-axis (they steer the RC,
+                // and yaw rotates the connector); driving straight to bPos then approaches diagonally
+                // and the hull jams against the base beside the connector. So: if off-axis, first
+                // slide sideways onto the axis while holding standoff in front; only once lined up
+                // do we reverse straight in along the axis to the mate point.
+                Vector3D rel = dPos - bPos;                 // drone connector relative to base connector
+                double along = Vector3D.Dot(rel, bFwd);     // distance out in front along the axis (>0 = in front)
+                Vector3D lateralVec = rel - bFwd * along;   // off-axis component
+                double lateral = lateralVec.Length();
+
+                Vector3D to; double sp; string leg;
+                if (lateral > DockLateralTol)
+                {
+                    double holdAlong = System.Math.Max(along, StageFwd); // stay (or back off) to standoff while sliding
+                    to = (bPos + bFwd * holdAlong) - dPos;               // ~ pure lateral slide onto the axis
+                    sp = CrawlSpeedMid;
+                    leg = "lineup";
+                }
+                else
+                {
+                    to = bPos - dPos; // on-axis: reverse straight in
+                    double d = to.Length();
+                    sp = d > CrawlFarDist ? CrawlSpeedFar : d > CrawlMidDist ? CrawlSpeedMid : CrawlSpeedNear;
+                    leg = "reverse";
+                }
+                double sat = _bore.Maneuver(grid, to, sp, 0.0); // magnet snaps at Connectable
+                DockTelemetry(m, leg, to.Length(), vel.Length(), Vector3D.Dot(dFwd, -bFwd), sat, lateral);
             }
         }
 
-        private void DockTelemetry(Mission m, string leg, double dist, double speed, double alignDot, double sat)
+        private void DockTelemetry(Mission m, string leg, double dist, double speed, double alignDot, double sat, double lateral = -1)
         {
             if ((DateTime.UtcNow - _lastDockLog).TotalSeconds < 3) return;
             _lastDockLog = DateTime.UtcNow;
+            string latStr = lateral >= 0 ? string.Format(" lat={0:F1}", lateral) : "";
             MyLog.Default.WriteLineAndConsole(string.Format(
-                "[ColonyFramework] Mission {0}: dock[{1}] dist={2:F1} vel={3:F1} align={4:F2} thrustSat={5:F2}",
-                m.Id, leg, dist, speed, alignDot, sat));
+                "[ColonyFramework] Mission {0}: dock[{1}] dist={2:F1} vel={3:F1} align={4:F2} thrustSat={5:F2}{6}",
+                m.Id, leg, dist, speed, alignDot, sat, latStr));
         }
 
         // Hard stop: clear controls, fail the mission, free the asset.

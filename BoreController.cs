@@ -111,6 +111,71 @@ namespace ColonyFramework
             return worstSat;
         }
 
+        // Per-axis software dampener (dampeners OFF), consuming the awareness layer. Splits the error
+        // to the target into a VERTICAL (gravity-up) axis and a HORIZONTAL axis; holds each toward
+        // zero at a capped, eased speed with a position + velocity deadband; brakes sideways drift;
+        // ALWAYS fully compensates gravity. Inside both deadbands it is a pure hover — no hunting, no
+        // oscillation, no wasted power. Because altitude is its own axis, "at the right height but
+        // off horizontally" no longer blocks, and altitude is actively held during lateral/axial
+        // moves. Returns worst-axis thrust saturation (>1 = physically underpowered).
+        private const double ApproachGain = 0.8; // desired axis speed = error * gain, capped at maxSpeed
+        public double Navigate(IMyCubeGrid grid, NavState nav, Vector3D targetPos,
+                               double maxSpeed, double posDeadband, double velDeadband)
+        {
+            if (grid.Physics == null || !nav.Valid) return 0;
+            Vector3D up = nav.GravityUp;
+
+            double vErr = nav.VerticalError(targetPos);          // signed, along up
+            Vector3D hErrVec = nav.HorizontalTo(targetPos);
+            double hErr = hErrVec.Length();
+            Vector3D hDir = hErr > 1e-3 ? hErrVec / hErr : Vector3D.Zero;
+
+            double vDes = System.Math.Abs(vErr) <= posDeadband ? 0.0 : Clamp(vErr * ApproachGain, -maxSpeed, maxSpeed);
+            double hDes = hErr <= posDeadband ? 0.0 : System.Math.Min(maxSpeed, hErr * ApproachGain);
+
+            double vAct = nav.VertSpeed;
+            Vector3D hVelVec = nav.Velocity - up * vAct;
+            double hAct = Vector3D.Dot(hVelVec, hDir);           // velocity toward the target (horizontal)
+            Vector3D hDrift = hVelVec - hDir * hAct;             // sideways drift to cancel
+
+            double vVelErr = vDes - vAct; if (System.Math.Abs(vVelErr) < velDeadband) vVelErr = 0;
+            double hVelErr = hDes - hAct; if (System.Math.Abs(hVelErr) < velDeadband) hVelErr = 0;
+
+            Vector3D accel = up * (vVelErr * VelKp)
+                           + hDir * (hVelErr * VelKp)
+                           - hDrift * VelKp;                     // kill sideways drift
+
+            float interference;
+            Vector3D g = MyAPIGateway.Physics.CalculateNaturalGravityAt(grid.GetPosition(), out interference);
+            accel -= g;                                          // full gravity compensation
+            return ApplyForce(grid, accel * grid.Physics.Mass);
+        }
+
+        private static double Clamp(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+        // Like Face, but once aligned within holdDot it STOPS issuing gyro override (lets it coast)
+        // instead of micro-correcting every tick — kills the "nervous" oscillation and saves power.
+        // Does not touch thrusters (Navigate owns those).
+        public double FaceHold(IMyCubeGrid grid, Vector3D aimAxis, Vector3D targetDir, double holdDot)
+        {
+            double dot = Vector3D.Dot(aimAxis, targetDir);
+            if (dot >= holdDot) { ClearGyros(grid); return dot; }
+            return Align(grid, aimAxis, targetDir);
+        }
+
+        private void ClearGyros(IMyCubeGrid grid)
+        {
+            var ts = MyAPIGateway.TerminalActionsHelper.GetTerminalSystemForGrid(grid);
+            if (ts == null) return;
+            var gyros = new List<IMyGyro>();
+            ts.GetBlocksOfType(gyros);
+            for (int i = 0; i < gyros.Count; i++)
+            {
+                gyros[i].GyroOverride = false;
+                gyros[i].Pitch = 0; gyros[i].Yaw = 0; gyros[i].Roll = 0;
+            }
+        }
+
         public void Release(IMyCubeGrid grid)
         {
             var ts = MyAPIGateway.TerminalActionsHelper.GetTerminalSystemForGrid(grid);

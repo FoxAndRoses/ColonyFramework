@@ -145,6 +145,7 @@ namespace ColonyFramework
         private DateTime _recoverStart;
         private DateTime _lastGroundAvoid; // throttle for mid-cruise climb re-engages
         private double _dockSpeedScale = 1.0; // soft failsafe: each dock retry crawls slower
+        private DateTime _lastDescendDbg;     // throttle for the descend control diagnostic
         private int _boreIndex;
         private bool _oriented;
         private DateTime _subStart;
@@ -907,6 +908,13 @@ namespace ColonyFramework
                 Vector3D target = _nav.ConnectorPos + _nav.GravityUp * vErr; // straight to connector altitude, hold horizontal
                 double dsat = _bore.Navigate(grid, _nav, target, DockDescendSpeed * _dockSpeedScale, AltDeadband, NavVelDeadband);
                 Narrate(m, "dock/descend", bPos, dsat);
+                if ((DateTime.UtcNow - _lastDescendDbg).TotalSeconds >= 3)
+                {
+                    _lastDescendDbg = DateTime.UtcNow;
+                    MyLog.Default.WriteLineAndConsole(string.Format(
+                        "[ColonyFramework] Mission {0}: descend-ctl vErr={1:F1} vCap={2:F2} vDes={3:F2} vAct={4:F2} g={5:F1} maxSpd={6:F2} sat={7:F2}",
+                        m.Id, _bore.DbgVErr, _bore.DbgVCap, _bore.DbgVDes, _bore.DbgVAct, _bore.DbgGMag, DockDescendSpeed * _dockSpeedScale, dsat));
+                }
                 if (System.Math.Abs(vErr) <= AltDeadband && _nav.Speed < NavSettleSpeed)
                 {
                     _retries = 0;

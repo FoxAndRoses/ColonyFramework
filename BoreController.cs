@@ -165,8 +165,14 @@ namespace ColonyFramework
                            + hDir * (hVelErr * NavKp)
                            - hDrift * NavKp;                     // kill sideways drift
             accel -= g;                                          // full gravity compensation
+
+            // diagnostics (read by the caller's self-report)
+            DbgVErr = vErr; DbgVCap = vCap; DbgVDes = vDes; DbgVAct = vAct; DbgGMag = gMag;
             return ApplyForce(grid, accel * mass);
         }
+
+        // Last per-axis decision from Navigate, for telemetry (why is/ isn't it braking?).
+        public double DbgVErr, DbgVCap, DbgVDes, DbgVAct, DbgGMag;
 
         // Total thrust (N) the grid can produce roughly along 'worldUp' — the drone's lift capability.
         // Used to size a descent it can actually stop, and (later) a hover-capability check.

@@ -104,6 +104,20 @@ namespace ColonyFramework
             {
                 var player = MyAPIGateway.Session.Player;
                 Vector3D ppos = player.GetPosition();
+
+                // Never register the colony's own base structure (the core grid + everything physically
+                // attached to it) as a mining asset — that block dispatch of the real drones.
+                var baseGrids = new HashSet<long>();
+                var coreBlock = MyAPIGateway.Entities.GetEntityById(colony.State.CoreEntityId) as IMyCubeBlock;
+                if (coreBlock != null)
+                {
+                    var bgrids = new List<IMyCubeGrid>();
+                    var group = coreBlock.CubeGrid.GetGridGroup(GridLinkTypeEnum.Physical);
+                    if (group != null) group.GetGrids(bgrids);
+                    if (bgrids.Count == 0) bgrids.Add(coreBlock.CubeGrid);
+                    for (int i = 0; i < bgrids.Count; i++) baseGrids.Add(bgrids[i].EntityId);
+                }
+
                 var ents = new HashSet<IMyEntity>();
                 MyAPIGateway.Entities.GetEntities(ents, e => e is IMyCubeGrid);
                 IMyCubeGrid nearest = null;
@@ -112,12 +126,14 @@ namespace ColonyFramework
                 {
                     var g = e as IMyCubeGrid;
                     if (g == null) continue;
+                    if (baseGrids.Contains(g.EntityId)) continue; // skip the base/core structure
+                    if (g.IsStatic) continue;                     // a station isn't a drone
                     double sq = Vector3D.DistanceSquared(g.GetPosition(), ppos);
                     if (sq < bestSq) { bestSq = sq; nearest = g; }
                 }
                 if (nearest == null)
                 {
-                    MyAPIGateway.Utilities.ShowMessage("Colony", "no grid within 100m to register");
+                    MyAPIGateway.Utilities.ShowMessage("Colony", "no eligible drone grid within 100m (the base/core is excluded)");
                     return;
                 }
                 colony.Assets.Register(nearest.EntityId, AssetType.Miner, nearest.GetPosition(), nearest.DisplayName);

@@ -23,10 +23,13 @@ namespace ColonyFramework
         private const int PhaseRetreat    = 4;
         private const int PhaseDock       = 5;
 
-        private const int DockOver    = 0; // fly over the connector to the staging offset
-        private const int DockDown    = 1; // descend straight down to connector altitude
+        private const int DockOver    = 0; // fly to the staging point (out in front of + above the connector)
+        private const int DockDown    = 1; // descend straight down to connector altitude (still out in front)
         private const int DockAlign   = 2; // DAMPENERS ON: rotate in place to face the connector, hold stable
-        private const int DockReverse = 3; // DAMPENERS OFF (only now): reverse into the connector and lock
+        private const int DockLineup  = 3; // DAMPENERS OFF: slide laterally onto the connector axis at standoff
+        private const int DockReverse = 4; // DAMPENERS OFF: reverse straight in along the axis and lock
+        private const int DockUnload  = 5; // locked: transfer cargo into the base, then complete
+        private const int DockRecover = 6; // a stage failed: fly back to the core standoff, then retry the dock
 
         private const int BoreReposition = 0;
         private const int BoreDescend    = 1;
@@ -73,7 +76,7 @@ namespace ColonyFramework
         // Docking is connector-relative and uses the DRONE CONNECTOR (not the RC) as the distance
         // reference. 3 steps: fly over the connector (StageFwd out + StageUp up) → descend straight
         // down to connector altitude → reverse into the connector at tiered speed. Dampeners stay ON.
-        private const double StageFwd        = 8.0;  // m in front of the base connector (close, so the dampeners-off reverse is short)
+        private const double StageFwd        = 20.0; // m in front of the base connector — descend out here, NOT directly above it (avoids hitting the base on the way down)
         private const double StageUp         = 40.0; // m above the base connector for the over/staging point
         private const double DockMoveSpeed   = 6.0;  // cruise cap flying over to the staging point
         private const double DockArriveTol   = 3.0;  // arrival tolerance at the staging / altitude points
@@ -87,6 +90,8 @@ namespace ColonyFramework
         private const double CrawlSpeedMid   = 1.0;  // m/s   (5–10 m)
         private const double CrawlSpeedNear  = 0.25; // m/s   (<5 m, until bump)
         private const double DockLateralTol  = 0.3;  // m off the connector axis we tolerate before reversing straight in
+        private const double DockRunawayMargin = 4.0; // m past closest approach on a dampers-off dock leg = overshoot → recover
+        private const double DockUnloadSecs  = 30.0; // max time to drain cargo once locked before completing anyway
         private const double DockTimeoutSecs = 180;  // give up → complete near base
 
         private const double CargoThreshold     = 0.80;
@@ -116,6 +121,7 @@ namespace ColonyFramework
         private int _dockSub;
         private long _dockConnectorId;
         private DateTime _dockStart;
+        private DateTime _unloadStart;
         private DateTime _lastDockLog;
         private DateTime _legStart;   // start time of the current autopilot leg (transit / return)
         private double _legMinDist;   // closest approach to the leg's waypoint (for runaway detection)
@@ -679,7 +685,7 @@ namespace ColonyFramework
             var asset = colony.Assets.GetByEntityId(m.AssignedAssetId);
             if (asset != null) { asset.Status = AssetStatus.Idle; asset.AssignedMissionId = 0; }
             MyLog.Default.WriteLineAndConsole(string.Format(
-                "[ColonyFramework] Mission {0} complete: deposit {1} mined (cargo {2:N0}%), asset idle, at base standoff",
+                "[ColonyFramework] Mission {0} complete: deposit {1} mined (drone cargo now {2:N0}%), asset idle",
                 m.Id, m.TargetDepositId, cargo * 100));
         }
 
@@ -693,7 +699,7 @@ namespace ColonyFramework
 
             if ((DateTime.UtcNow - _dockStart).TotalSeconds > DockTimeoutSecs)
             {
-                RetryOrFail(colony, m, deposit, grid, "dock timeout");
+                DockFallback(colony, m, grid, "dock timeout");
                 return;
             }
 
@@ -710,41 +716,61 @@ namespace ColonyFramework
 
             Vector3D up = Up(dPos);
 
-            if (_dockSub == DockOver)
+            if (_dockSub == DockRecover)
             {
-                // Autopilot (DAMPENERS ON) flies over the connector to the staging point.
+                // A stage failed: fly (DAMPENERS ON) back to the safe standoff above the core, then
+                // restart the whole dock approach. This is the "reliable fallback" — always retreat
+                // to a known-good position rather than fighting at the connector.
+                Vector3D coreStandoff;
+                if (!TryCoreStandoff(colony, out coreStandoff)) { CompleteMission(colony, m, grid); return; }
+                var rcr = DroneUtil.FindRc(grid);
+                if (rcr != null && !rcr.DampenersOverride) rcr.DampenersOverride = true;
+                double rd = Vector3D.Distance(rcPos, coreStandoff);
+                DockTelemetry(m, "recover", rd, vel.Length(), 0, 0);
+                if (rd <= ArriveDistance && vel.Length() < DockSettleSpeed)
+                {
+                    if (rcr != null) rcr.SetAutoPilotEnabled(false);
+                    MyLog.Default.WriteLineAndConsole(string.Format(
+                        "[ColonyFramework] Mission {0}: back at standoff, retrying dock", m.Id));
+                    BeginDock(colony, m, grid, grid.GetPosition());
+                }
+                else { string fail = LegOk(rd, DockTimeoutSecs, "dock recover"); if (fail != null) { DockFallback(colony, m, grid, fail); return; } }
+            }
+            else if (_dockSub == DockOver)
+            {
+                // Autopilot (DAMPENERS ON) flies to the staging point: StageFwd in FRONT of the
+                // connector and StageUp above it — never directly above the connector (descending
+                // there clips the base).
                 Vector3D over = bPos + bFwd * StageFwd + up * StageUp;
                 double dist = Vector3D.Distance(rcPos, over); // gate on the RC — autopilot drives it
                 DockTelemetry(m, "over", dist, vel.Length(), Vector3D.Dot(dFwd, -bFwd), 0);
                 if (dist <= DockArriveTol && vel.Length() < DockSettleSpeed)
                 {
                     _retries = 0; // sub-state advanced — progress
-                    EngageAutopilot(grid, bPos + bFwd * StageFwd); // next: descend to connector altitude
+                    EngageAutopilot(grid, bPos + bFwd * StageFwd); // descend straight down, still out in front
                     _dockSub = DockDown;
                     MyLog.Default.WriteLineAndConsole(string.Format(
-                        "[ColonyFramework] Mission {0}: over connector, descending to its altitude", m.Id));
+                        "[ColonyFramework] Mission {0}: at staging point ({1:F0} m in front), descending to connector altitude", m.Id, StageFwd));
                 }
-                else { string fail = LegOk(dist, DockTimeoutSecs, "dock approach"); if (fail != null) { RetryOrFail(colony, m, deposit, grid, fail); return; } }
+                else { string fail = LegOk(dist, DockTimeoutSecs, "dock approach"); if (fail != null) { DockFallback(colony, m, grid, fail); return; } }
             }
             else if (_dockSub == DockDown)
             {
-                // Autopilot (DAMPENERS ON) descends to the connector's altitude and stabilizes.
+                // Autopilot (DAMPENERS ON) descends to connector altitude, still StageFwd out in front.
                 Vector3D atAltitude = bPos + bFwd * StageFwd;
                 double dist = Vector3D.Distance(rcPos, atAltitude); // gate on the RC — autopilot drives it
                 DockTelemetry(m, "down", dist, vel.Length(), Vector3D.Dot(dFwd, -bFwd), 0);
                 if (dist <= DockArriveTol && vel.Length() < DockSettleSpeed)
                 {
-                    // Stable at the connector altitude — turn off autopilot but KEEP dampeners on,
-                    // then rotate to face the connector before any dampeners-off movement.
                     _retries = 0; // sub-state advanced — progress
                     var rc = DroneUtil.FindRc(grid);
                     if (rc != null) rc.SetAutoPilotEnabled(false);
                     _dockSub = DockAlign;
-                    ResetLeg(); // align/reverse aren't autopilot legs; reset the watchdog baseline
+                    ResetLeg();
                     MyLog.Default.WriteLineAndConsole(string.Format(
                         "[ColonyFramework] Mission {0}: at connector altitude, facing connector", m.Id));
                 }
-                else { string fail = LegOk(dist, DockTimeoutSecs, "dock descent"); if (fail != null) { RetryOrFail(colony, m, deposit, grid, fail); return; } }
+                else { string fail = LegOk(dist, DockTimeoutSecs, "dock descent"); if (fail != null) { DockFallback(colony, m, grid, fail); return; } }
             }
             else if (_dockSub == DockAlign)
             {
@@ -757,66 +783,129 @@ namespace ColonyFramework
                 {
                     _retries = 0; // sub-state advanced — progress
                     var rc = DroneUtil.FindRc(grid);
-                    if (rc != null) rc.DampenersOverride = false; // NOW it's facing + stable
-                    _dockSub = DockReverse;
+                    if (rc != null) rc.DampenersOverride = false; // facing + stable; Maneuver (software dampers) takes over
+                    _dockSub = DockLineup;
+                    ResetLeg();
                     MyLog.Default.WriteLineAndConsole(string.Format(
-                        "[ColonyFramework] Mission {0}: facing connector + stable, reversing in (dampeners off)", m.Id));
+                        "[ColonyFramework] Mission {0}: facing connector + stable, lining up on axis", m.Id));
                 }
-                else
-                {
-                    string fail = LegOk(vel.Length(), DockTimeoutSecs, "dock align");
-                    if (fail != null) { RetryOrFail(colony, m, deposit, grid, fail); return; }
-                }
+                else { string fail = LegOk(vel.Length(), DockTimeoutSecs, "dock align"); if (fail != null) { DockFallback(colony, m, grid, fail); return; } }
             }
-            else // DockReverse — DAMPENERS OFF: gyro holds the facing, Maneuver reverses it in
+            else if (_dockSub == DockLineup || _dockSub == DockReverse)
             {
-                if (vel.Length() > DockMaxSafeSpeed)
-                {
-                    RetryOrFail(colony, m, deposit, grid, string.Format("dock overspeed ({0:F0} m/s)", vel.Length()));
-                    return;
-                }
-                if (droneCon.Status == MyShipConnectorStatus.Connected)
-                {
-                    MyLog.Default.WriteLineAndConsole(string.Format(
-                        "[ColonyFramework] Mission {0}: docked at base — mission complete", m.Id));
-                    if (!MyAPIGateway.Utilities.IsDedicated)
-                        MyAPIGateway.Utilities.ShowMessage("Colony", "Docked at base, mission complete");
-                    CompleteMission(colony, m, grid);
-                    return;
-                }
+                // DAMPENERS OFF. Gyro holds the connector facing the base; Maneuver (software damper)
+                // moves it. Never drive straight at the connector from off-axis — the hull jams
+                // against the base. DockLineup slides laterally onto the axis; DockReverse then backs
+                // straight in. Any overshoot/stuck on these legs triggers the standoff fallback.
+                if (vel.Length() > DockMaxSafeSpeed) { DockFallback(colony, m, grid, string.Format("dock overspeed ({0:F0} m/s)", vel.Length())); return; }
+                if (droneCon.Status == MyShipConnectorStatus.Connected) { BeginUnload(m, grid); return; }
                 if (droneCon.Status == MyShipConnectorStatus.Connectable) droneCon.Connect();
 
-                _bore.Face(grid, dFwd, -bFwd); // aim the drone connector at the base connector
+                _bore.Face(grid, dFwd, -bFwd); // hold the drone connector aimed at the base connector
 
-                // Approach ALONG the base connector's axis, never straight at it. The autopilot
-                // over/down legs leave the drone connector laterally off-axis (they steer the RC,
-                // and yaw rotates the connector); driving straight to bPos then approaches diagonally
-                // and the hull jams against the base beside the connector. So: if off-axis, first
-                // slide sideways onto the axis while holding standoff in front; only once lined up
-                // do we reverse straight in along the axis to the mate point.
                 Vector3D rel = dPos - bPos;                 // drone connector relative to base connector
                 double along = Vector3D.Dot(rel, bFwd);     // distance out in front along the axis (>0 = in front)
                 Vector3D lateralVec = rel - bFwd * along;   // off-axis component
                 double lateral = lateralVec.Length();
 
-                Vector3D to; double sp; string leg;
-                if (lateral > DockLateralTol)
+                if (_dockSub == DockLineup)
                 {
-                    double holdAlong = System.Math.Max(along, StageFwd); // stay (or back off) to standoff while sliding
-                    to = (bPos + bFwd * holdAlong) - dPos;               // ~ pure lateral slide onto the axis
-                    sp = CrawlSpeedMid;
-                    leg = "lineup";
+                    double holdAlong = System.Math.Max(along, StageFwd);   // stay/back off to standoff while sliding
+                    Vector3D to = (bPos + bFwd * holdAlong) - dPos;        // ~ pure lateral slide onto the axis
+                    double sat = _bore.Maneuver(grid, to, CrawlSpeedMid, 0.0);
+                    DockTelemetry(m, "lineup", to.Length(), vel.Length(), Vector3D.Dot(dFwd, -bFwd), sat, lateral);
+                    if (lateral <= DockLateralTol && vel.Length() < DockSettleSpeed)
+                    {
+                        _retries = 0;
+                        _dockSub = DockReverse;
+                        ResetLeg();
+                        MyLog.Default.WriteLineAndConsole(string.Format(
+                            "[ColonyFramework] Mission {0}: lined up on axis, reversing straight in", m.Id));
+                    }
+                    else if (DockWatch(lateral)) { DockFallback(colony, m, grid, "dock lineup overshoot/stuck"); return; }
                 }
-                else
+                else // DockReverse
                 {
-                    to = bPos - dPos; // on-axis: reverse straight in
+                    if (lateral > DockLateralTol * 3) { _dockSub = DockLineup; ResetLeg(); return; } // drifted off-axis: re-line-up
+                    Vector3D to = bPos - dPos;
                     double d = to.Length();
-                    sp = d > CrawlFarDist ? CrawlSpeedFar : d > CrawlMidDist ? CrawlSpeedMid : CrawlSpeedNear;
-                    leg = "reverse";
+                    double sp = d > CrawlFarDist ? CrawlSpeedFar : d > CrawlMidDist ? CrawlSpeedMid : CrawlSpeedNear;
+                    double sat = _bore.Maneuver(grid, to, sp, 0.0); // magnet snaps at Connectable
+                    DockTelemetry(m, "reverse", d, vel.Length(), Vector3D.Dot(dFwd, -bFwd), sat, lateral);
+                    if (DockWatch(d)) { DockFallback(colony, m, grid, "dock reverse overshoot/stuck"); return; }
                 }
-                double sat = _bore.Maneuver(grid, to, sp, 0.0); // magnet snaps at Connectable
-                DockTelemetry(m, leg, to.Length(), vel.Length(), Vector3D.Dot(dFwd, -bFwd), sat, lateral);
             }
+            else // DockUnload
+            {
+                TickUnload(colony, m, grid, droneCon);
+            }
+        }
+
+        // Watchdog for a DAMPENERS-OFF dock leg (lineup/reverse): returns true if the connector has
+        // overshot its closest approach by DockRunawayMargin, or made no progress for LegStuckSecs.
+        private bool DockWatch(double dist)
+        {
+            if (dist < _legMinDist - LegProgressEps) { _legMinDist = dist; _legProgressTime = DateTime.UtcNow; }
+            else if (dist < _legMinDist) _legMinDist = dist;
+            bool overshoot = dist > _legMinDist + DockRunawayMargin;
+            bool stuck = (DateTime.UtcNow - _legProgressTime).TotalSeconds > LegStuckSecs;
+            return overshoot || stuck;
+        }
+
+        // Reliable dock fallback: stabilise (DAMPENERS ON, overrides cleared), fly back to the core
+        // standoff, then restart the dock — up to MaxRetries, after which announce the error and fail.
+        private void DockFallback(Colony colony, Mission m, IMyCubeGrid grid, string reason)
+        {
+            _retries++;
+            if (_retries > MaxRetries)
+            {
+                MyLog.Default.WriteLineAndConsole(string.Format(
+                    "[ColonyFramework] Mission {0}: ERROR after {1} dock retries: {2}", m.Id, MaxRetries, reason));
+                if (!MyAPIGateway.Utilities.IsDedicated)
+                    MyAPIGateway.Utilities.ShowMessage("Colony", string.Format("Error occurred: {0} (mission {1})", reason, m.Id));
+                FailMission(colony, m, grid, reason);
+                return;
+            }
+            MyLog.Default.WriteLineAndConsole(string.Format(
+                "[ColonyFramework] Mission {0}: dock retry {1}/{2} — {3}, returning to standoff", m.Id, _retries, MaxRetries, reason));
+            StabilizeDrone(grid); // autopilot off, DAMPENERS ON, gyro/thrust cleared, drills off — reliable safe state
+            Vector3D coreStandoff;
+            if (TryCoreStandoff(colony, out coreStandoff)) EngageAutopilot(grid, coreStandoff);
+            _dockSub = DockRecover;
+            _dockStart = DateTime.UtcNow;
+            ResetLeg();
+        }
+
+        // Connector locked: stop drills/overrides, restore dampers, begin draining cargo into the base.
+        private void BeginUnload(Mission m, IMyCubeGrid grid)
+        {
+            DroneUtil.SetDrills(grid, false);
+            _bore.Release(grid);
+            var rc = DroneUtil.FindRc(grid);
+            if (rc != null) rc.DampenersOverride = true; // locked to base; dampers on
+            _dockSub = DockUnload;
+            _unloadStart = DateTime.UtcNow;
+            if (!MyAPIGateway.Utilities.IsDedicated)
+                MyAPIGateway.Utilities.ShowMessage("Colony", "Docked at base, transferring cargo");
+            MyLog.Default.WriteLineAndConsole(string.Format(
+                "[ColonyFramework] Mission {0}: docked + locked, transferring cargo to base", m.Id));
+        }
+
+        // Push cargo through the locked connector into the base; complete when empty (or after a
+        // grace timeout). The mission is only complete once cargo has been delivered.
+        private void TickUnload(Colony colony, Mission m, IMyCubeGrid grid, IMyShipConnector droneCon)
+        {
+            bool empty = DroneUtil.UnloadCargo(grid, droneCon);
+            bool timedOut = (DateTime.UtcNow - _unloadStart).TotalSeconds > DockUnloadSecs;
+            if (!empty && !timedOut) return;
+
+            double fill = DroneUtil.CargoFill(grid);
+            MyLog.Default.WriteLineAndConsole(string.Format(
+                "[ColonyFramework] Mission {0}: cargo transfer {1} (drone fill {2:N0}%)",
+                m.Id, empty ? "complete" : "timed out", fill * 100));
+            if (!MyAPIGateway.Utilities.IsDedicated)
+                MyAPIGateway.Utilities.ShowMessage("Colony", empty ? "Mining mission complete, cargo delivered" : "Docked; cargo transfer incomplete");
+            CompleteMission(colony, m, grid);
         }
 
         private void DockTelemetry(Mission m, string leg, double dist, double speed, double alignDot, double sat, double lateral = -1)

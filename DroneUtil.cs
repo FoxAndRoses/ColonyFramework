@@ -7,6 +7,7 @@ using MyShipConnectorStatus = Sandbox.ModAPI.Ingame.MyShipConnectorStatus;
 using IMyCubeGrid  = VRage.Game.ModAPI.IMyCubeGrid;
 using IMyCubeBlock = VRage.Game.ModAPI.IMyCubeBlock;
 using IMySlimBlock = VRage.Game.ModAPI.IMySlimBlock;
+using IMyInventory = VRage.Game.ModAPI.IMyInventory;
 
 namespace ColonyFramework
 {
@@ -160,6 +161,67 @@ namespace ColonyFramework
         {
             var drills = FindDrills(grid);
             for (int i = 0; i < drills.Count; i++) drills[i].Enabled = on;
+        }
+
+        // Push all items from the drone's inventories into the base (through the locked connector's
+        // conveyor network) — one pass per call. Returns true once the drone holds nothing.
+        public static bool UnloadCargo(IMyCubeGrid drone, IMyShipConnector droneCon)
+        {
+            var baseCon = droneCon != null ? droneCon.OtherConnector : null;
+            if (baseCon == null) return false; // not actually connected — don't claim done
+
+            var dsts = new List<IMyInventory>();
+            GatherInventories(baseCon.CubeGrid, dsts, drone, true); // whole base group, excluding the drone
+            if (dsts.Count == 0) return false; // nowhere to put it
+
+            var srcs = new List<IMyInventory>();
+            GatherInventories(drone, srcs, null, false); // drone grid only
+
+            double remaining = 0;
+            for (int s = 0; s < srcs.Count; s++)
+            {
+                var src = srcs[s];
+                bool moved = true; int guard = 0;
+                while (src.ItemCount > 0 && moved && guard++ < 500)
+                {
+                    moved = false;
+                    for (int d = 0; d < dsts.Count; d++)
+                        if (src.TransferItemTo(dsts[d], 0)) { moved = true; break; } // move item 0; next shifts down
+                }
+                remaining += (double)src.CurrentVolume;
+            }
+            return remaining < 1e-6;
+        }
+
+        // Collect every block inventory on a grid (or its whole physical group), optionally skipping
+        // one grid (e.g. the drone itself once it has merged into the base group via the connector).
+        private static void GatherInventories(IMyCubeGrid anyGrid, List<IMyInventory> into, IMyCubeGrid exclude, bool wholeGroup)
+        {
+            var grids = new List<IMyCubeGrid>();
+            if (wholeGroup)
+            {
+                var group = anyGrid.GetGridGroup(GridLinkTypeEnum.Physical);
+                if (group != null) group.GetGrids(grids);
+            }
+            if (grids.Count == 0) grids.Add(anyGrid);
+
+            var blocks = new List<IMySlimBlock>();
+            for (int g = 0; g < grids.Count; g++)
+            {
+                if (grids[g] == exclude) continue;
+                blocks.Clear();
+                grids[g].GetBlocks(blocks);
+                for (int b = 0; b < blocks.Count; b++)
+                {
+                    var fat = blocks[b].FatBlock as IMyCubeBlock;
+                    if (fat == null || !fat.HasInventory) continue;
+                    for (int i = 0; i < fat.InventoryCount; i++)
+                    {
+                        var inv = fat.GetInventory(i);
+                        if (inv != null) into.Add(inv);
+                    }
+                }
+            }
         }
 
         // Unlock landing gear and disconnect connectors so the drone can launch.

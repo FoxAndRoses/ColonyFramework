@@ -86,6 +86,7 @@ namespace ColonyFramework
         private const double StageUp         = 20.0; // m above the base connector for the staging point (descent distance)
         private const double DescendPulseSpeed = 1.5; // m/s cap per descent pulse — small enough the dampeners CAN arrest it
         private const double DescendBias     = 0.15; // gentle sink: up-thrust = (1-bias)*weight during a pulse
+        private const double DescendPanicSpeed = 3.0; // if descent exceeds this, force the modAPI dampers on (anti-slam)
         private const double DockMoveSpeed   = 6.0;  // cruise cap flying over to the staging point
         private const double DockArriveTol   = 3.0;  // arrival tolerance at the staging / altitude points
         private const double DockSettleSpeed = 0.5;  // m/s "settled" threshold before advancing a leg
@@ -907,41 +908,47 @@ namespace ColonyFramework
                 var rc = DroneUtil.FindRc(grid);
                 double vErr = _nav.VerticalError(bPos);   // <0 = connector below us (descend), >0 = below target
                 double descSpeed = -_nav.VertSpeed;       // >0 = descending
+                if (descSpeed > DescendPanicSpeed) _descBrake = true; // runaway -> force the dampers on
 
                 if (System.Math.Abs(vErr) <= AltDeadband && _nav.Speed < NavSettleSpeed)
                 {
-                    if (rc != null) rc.DampenersOverride = true;
+                    if (rc != null) rc.DampenersOverride = true; _bore.ClearThrust(grid);
                     _retries = 0; _descBrake = false; _dockSub = DockLineup; ResetLeg();
                     MyLog.Default.WriteLineAndConsole(string.Format(
                         "[ColonyFramework] Mission {0}: at connector altitude (vErr {1:F1} m), lining up", m.Id, vErr));
                 }
                 else if (_descBrake)
                 {
-                    if (rc != null) rc.DampenersOverride = true;          // dampeners arrest the pulse
+                    // modAPI dampers ON and OUR thrust RELEASED — the game dampers must have FULL
+                    // authority to arrest (leftover overrides fighting them was the slam).
+                    if (rc != null) rc.DampenersOverride = true;
+                    _bore.ClearThrust(grid);
                     Narrate(m, "dock/brake", bPos);
-                    if (_nav.Speed < NavSettleSpeed) _descBrake = false;  // arrested -> re-check / next pulse
+                    if (_nav.Speed < NavSettleSpeed) _descBrake = false; // arrested -> re-check / next pulse
+                    else if (DockWatch(System.Math.Abs(vErr))) { DockFallback(colony, m, grid, "dock brake stuck"); return; }
                 }
-                else if (vErr < -AltDeadband)                             // above target -> descend a pulse
+                else if (vErr < -AltDeadband)                             // above target -> short controlled sink
                 {
                     double pulseSpeed = System.Math.Min(DescendPulseSpeed * _dockSpeedScale,
                                                         System.Math.Max(0.4, System.Math.Abs(vErr) * 0.5));
                     if (descSpeed >= pulseSpeed)
                     {
-                        if (rc != null) rc.DampenersOverride = true;      // built enough speed -> arrest
+                        if (rc != null) rc.DampenersOverride = true; _bore.ClearThrust(grid); // hand to dampers to arrest
                         _descBrake = true;
                     }
                     else
                     {
-                        if (rc != null) rc.DampenersOverride = false;     // DAMPENERS OFF: gentle controlled sink
+                        if (rc != null) rc.DampenersOverride = false;     // DAMPENERS OFF: OUR gentle controlled sink
                         _bore.HoverThrottle(grid, _nav, 1.0 - DescendBias);
                     }
                     Narrate(m, "dock/descend", bPos);
                     if (DockWatch(System.Math.Abs(vErr))) { DockFallback(colony, m, grid, "dock descend stuck"); return; }
                 }
-                else                                                     // overshot below -> hold (can't burst-climb)
+                else                                                     // overshot below -> hold on dampers (can't burst-climb)
                 {
-                    if (rc != null) rc.DampenersOverride = true;
+                    if (rc != null) rc.DampenersOverride = true; _bore.ClearThrust(grid);
                     Narrate(m, "dock/hold", bPos);
+                    if (DockWatch(System.Math.Abs(vErr))) { DockFallback(colony, m, grid, "dock overshot below"); return; }
                 }
             }
             else if (_dockSub == DockLineup || _dockSub == DockReverse)

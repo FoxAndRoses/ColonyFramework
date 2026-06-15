@@ -104,12 +104,11 @@ namespace ColonyFramework
                 {
                     double ratio = comp / total;
                     if (ratio > worstSat) worstSat = ratio;
-                    // Command absolute Newtons (this thruster's share of the needed force), NOT a
-                    // percentage of MaxThrust — the percentage path under-delivered braking force.
-                    double share = comp * (t.MaxEffectiveThrust / total);
-                    t.ThrustOverride = (float)System.Math.Min(share, t.MaxEffectiveThrust);
+                    // ThrustOverridePercentage (fraction of max) — the same path the bore uses and that
+                    // reliably produces thrust; the ThrustOverride-Newtons path was not delivering.
+                    t.ThrustOverridePercentage = MathHelper.Clamp((float)ratio, 0f, 1f);
                 }
-                else t.ThrustOverride = 0f;
+                else t.ThrustOverridePercentage = 0f;
             }
             return worstSat;
         }

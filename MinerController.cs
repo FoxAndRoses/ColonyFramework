@@ -58,6 +58,11 @@ namespace ColonyFramework
         private const double BoreDrillSpeed     = 0.15;  // in-rock crawl — drills stay ahead of the hull
         private const double AltFast            = 25.0;
         private const double AltMedium          = 5.0;
+        // Bore descends DAMPERS-OFF (high up-thrust dampers would otherwise prevent any descent),
+        // modulating up-thrust by descent rate to hold the tier speed.
+        private const double BoreDescendGain    = 0.4;   // throttle (×weight) per m/s of descent-rate error
+        private const double BoreDescendMin     = 0.4;   // min throttle (allows a brisk sink high up)
+        private const double BoreDescendMax     = 2.0;   // max throttle (brake near the surface)
 
         private const double OrientReadyDot        = 0.985; // nose-down settled (~10°)
         private const double UprightMinDot         = 0.5;   // flip guard (>60° off down)
@@ -476,6 +481,8 @@ namespace ColonyFramework
         {
             var drills = DroneUtil.FindDrills(grid);
             if (drills.Count == 0) { BeginRetreat(m, grid, "drills lost"); return; }
+            var rcm = DroneUtil.FindRc(grid);
+            if (rcm != null) rcm.DampenersOverride = true; // default ON; the rate-descent turns it off for its tick
 
             if (!DroneUtil.HasInfinitePower(grid))
             {
@@ -545,7 +552,7 @@ namespace ColonyFramework
                     double sp = gotAlt
                         ? (altitude > AltFast ? BoreApproachSpeed : altitude > AltMedium ? BoreMediumSpeed : BoreDrillSpeed)
                         : BoreMediumSpeed;
-                    _bore.Drive(grid, drillFwd, downDir, sp);            // descend drills-OFF until it stalls on the surface
+                    BoreRateDescend(grid, rcm, drillFwd, downDir, sp);   // dampers-OFF rate-controlled descent
 
                     double downSpeed = grid.Physics != null ? Vector3D.Dot(grid.Physics.LinearVelocity, downDir) : 0;
                     bool longEnough = (DateTime.UtcNow - _subStart).TotalSeconds > MinDescendSecs;
@@ -586,7 +593,7 @@ namespace ColonyFramework
                 }
                 else
                 {
-                    _bore.Drive(grid, drillFwd, downDir, BoreDrillSpeed);
+                    BoreRateDescend(grid, rcm, drillFwd, downDir, BoreDrillSpeed); // dampers-OFF crawl into rock
                 }
             }
             else // BoreAscend
@@ -621,6 +628,18 @@ namespace ColonyFramework
 
             if ((DateTime.UtcNow - _boreStart).TotalSeconds > BoreTimeoutSeconds)
                 BeginRetreat(m, grid, "timeout");
+        }
+
+        // Dampers-OFF rate-controlled descent for the bore: gyro holds the drills nose-down while
+        // up-thrust is modulated by descent rate to hold targetRate. With the drone's high up-thrust,
+        // leaving dampers ON makes them overpower the descent (the drone just hovers).
+        private void BoreRateDescend(IMyCubeGrid grid, IMyRemoteControl rc, Vector3D drillFwd, Vector3D downDir, double targetRate)
+        {
+            if (rc != null) rc.DampenersOverride = false;
+            _bore.Face(grid, drillFwd, downDir); // hold nose-down (gyro)
+            double dr = grid.Physics != null ? Vector3D.Dot((Vector3D)grid.Physics.LinearVelocity, downDir) : 0; // + = descending
+            double throttle = MathHelper.Clamp(1.0 + (dr - targetRate) * BoreDescendGain, BoreDescendMin, BoreDescendMax);
+            _bore.HoverThrottle(grid, _nav, throttle); // modulate up-thrust to hold targetRate
         }
 
         private void BeginRetreat(Mission m, IMyCubeGrid grid, string reason)

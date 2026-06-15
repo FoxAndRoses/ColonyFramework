@@ -193,6 +193,18 @@ namespace ColonyFramework
 
         private static double Clamp(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
+        // Apply a vertical thrust as a fraction of weight (DAMPENERS OFF): throttle=1 hovers,
+        // <1 sinks gently, >1 climbs. Used for the controlled descent pulse — a gentle sink the
+        // dampeners can then arrest, rather than a free-fall the burst-limited drone can't brake.
+        public void HoverThrottle(IMyCubeGrid grid, NavState nav, double throttle)
+        {
+            if (grid.Physics == null || !nav.Valid) return;
+            float interference;
+            Vector3D g = MyAPIGateway.Physics.CalculateNaturalGravityAt(grid.GetPosition(), out interference);
+            double mass = nav.Mass > 0 ? nav.Mass : grid.Physics.Mass;
+            ApplyForce(grid, -g * (mass * throttle)); // up = -gravity, scaled by throttle * weight
+        }
+
         // Like Face, but once aligned within holdDot it STOPS issuing gyro override (lets it coast)
         // instead of micro-correcting every tick — kills the "nervous" oscillation and saves power.
         // Does not touch thrusters (Navigate owns those).

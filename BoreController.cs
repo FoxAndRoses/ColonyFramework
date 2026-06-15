@@ -203,6 +203,17 @@ namespace ColonyFramework
             return Align(grid, aimAxis, targetDir);
         }
 
+        // Clear all thrust overrides (leave gyros alone) — so a dampers-ON nudge phase starts clean
+        // and the game's dampeners control every thruster we aren't actively biasing.
+        public void ClearThrust(IMyCubeGrid grid)
+        {
+            var ts = MyAPIGateway.TerminalActionsHelper.GetTerminalSystemForGrid(grid);
+            if (ts == null) return;
+            var thr = new List<IMyThrust>();
+            ts.GetBlocksOfType(thr);
+            for (int i = 0; i < thr.Count; i++) thr[i].ThrustOverride = 0f;
+        }
+
         private void ClearGyros(IMyCubeGrid grid)
         {
             var ts = MyAPIGateway.TerminalActionsHelper.GetTerminalSystemForGrid(grid);

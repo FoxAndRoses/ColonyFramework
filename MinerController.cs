@@ -82,8 +82,9 @@ namespace ColonyFramework
         // Docking is connector-relative and uses the DRONE CONNECTOR (not the RC) as the distance
         // reference. 3 steps: fly over the connector (StageFwd out + StageUp up) → descend straight
         // down to connector altitude → reverse into the connector at tiered speed. Dampeners stay ON.
-        private const double StageFwd        = 20.0; // m in front of the base connector — descend out here, NOT directly above it (avoids hitting the base on the way down)
-        private const double StageUp         = 40.0; // m above the base connector for the over/staging point
+        private const double StageFwd        = 20.0; // m in front of the base connector — approach/descend out here, NOT directly above it
+        private const double StageUp         = 40.0; // m above the base connector (legacy; unused since the diagonal approach)
+        private const double ApproachClearance = 2.0; // m above connector altitude the diagonal approach aims for
         private const double DockMoveSpeed   = 6.0;  // cruise cap flying over to the staging point
         private const double DockArriveTol   = 3.0;  // arrival tolerance at the staging / altitude points
         private const double DockSettleSpeed = 0.5;  // m/s "settled" threshold before advancing a leg
@@ -145,7 +146,6 @@ namespace ColonyFramework
         private DateTime _recoverStart;
         private DateTime _lastGroundAvoid; // throttle for mid-cruise climb re-engages
         private double _dockSpeedScale = 1.0; // soft failsafe: each dock retry crawls slower
-        private DateTime _lastDescendDbg;     // throttle for the descend control diagnostic
         private int _boreIndex;
         private bool _oriented;
         private DateTime _subStart;
@@ -859,123 +859,86 @@ namespace ColonyFramework
             }
             else if (_dockSub == DockOver)
             {
-                // Autopilot (DAMPENERS ON) flies to the staging point: StageFwd in FRONT of the
-                // connector and StageUp ABOVE it. Everything else happens from here — up high and
-                // well clear of the base.
-                Vector3D over = bPos + bFwd * StageFwd + up * StageUp;
-                double dist = Vector3D.Distance(rcPos, over); // gate on the RC — autopilot drives it
-                DockTelemetry(m, "over", dist, vel.Length(), Vector3D.Dot(dFwd, -bFwd), 0);
+                // Autopilot + DAMPENERS ON (game-managed, power-optimal) fly DIAGONALLY from the core
+                // standoff to the staging point: StageFwd in front of the connector, just above its
+                // altitude. Diagonal — never straight down — so autopilot brakes it cleanly, and the
+                // game's dampeners do the heavy braking/holding this loaded drone can't burst-produce
+                // with a custom dampers-off pilot.
+                Vector3D stage = bPos + bFwd * StageFwd + up * ApproachClearance;
+                double dist = Vector3D.Distance(rcPos, stage);
+                Narrate(m, "dock/approach", stage);
                 if (dist <= DockArriveTol && vel.Length() < DockSettleSpeed)
                 {
                     _retries = 0; // sub-state advanced — progress
                     var rc = DroneUtil.FindRc(grid);
-                    if (rc != null) rc.SetAutoPilotEnabled(false); // gyro takes over for the turn; dampeners stay ON
+                    if (rc != null) rc.SetAutoPilotEnabled(false); // gyro takes the turn; DAMPENERS STAY ON
                     _dockSub = DockAlign;
                     ResetLeg();
                     MyLog.Default.WriteLineAndConsole(string.Format(
-                        "[ColonyFramework] Mission {0}: at staging point ({1:F0} m in front, up high), facing connector", m.Id, StageFwd));
+                        "[ColonyFramework] Mission {0}: at staging point (in front of connector), facing it", m.Id));
                 }
                 else { string fail = LegOk(dist, DockTimeoutSecs, "dock approach"); if (fail != null) { DockFallback(colony, m, grid, fail); return; } }
             }
             else if (_dockSub == DockAlign)
             {
-                // DAMPENERS ON, UP HIGH at the staging point: rotate to face the connector. The drone
-                // connector is mounted far from the grid centre, so the turn swings it through a wide
-                // arc — doing it up here (not at connector altitude beside the base) keeps that arc
-                // clear of the structure. Cut dampeners only once facing + stable.
-                double a = _bore.Face(grid, dFwd, -bFwd); // gyro only; dampeners hold position
+                // DAMPENERS ON: rotate to face the connector while the dampeners hold position (rotation
+                // isn't damped). Dampeners STAY ON from here on — they hold altitude (which the drone
+                // CAN do) so a dampers-off descent it can't brake is never attempted.
+                var rca = DroneUtil.FindRc(grid);
+                if (rca != null && !rca.DampenersOverride) rca.DampenersOverride = true;
+                double a = _bore.Face(grid, dFwd, -bFwd);
                 DockTelemetry(m, "align", Vector3D.Distance(dPos, bPos), vel.Length(), a, 0);
                 if (a > DockAlignDot && vel.Length() < DockSettleSpeed)
                 {
                     _retries = 0; // sub-state advanced — progress
-                    var rc = DroneUtil.FindRc(grid);
-                    if (rc != null) rc.DampenersOverride = false; // stabilised above the connector; software dampers take over
-                    _dockSub = DockDescend;
-                    ResetLeg();
-                    MyLog.Default.WriteLineAndConsole(string.Format(
-                        "[ColonyFramework] Mission {0}: facing connector + stable, descending on-axis", m.Id));
-                }
-                else { string fail = LegOk(vel.Length(), DockTimeoutSecs, "dock align"); if (fail != null) { DockFallback(colony, m, grid, fail); return; } }
-            }
-            else if (_dockSub == DockDescend)
-            {
-                // DAMPENERS OFF, per-axis pilot: hold heading + horizontal position, drive ONLY the
-                // vertical axis to the base-connector altitude. Altitude is its own axis now, so
-                // horizontal drift can't block completion and the pilot can't sink past (it climbs
-                // back). Fixes the old "stuck 5.5 m short on blended 3D distance" retry loop.
-                _bore.FaceHold(grid, dFwd, -bFwd, AlignHoldDot);
-                double vErr = _nav.VerticalError(bPos);                 // + = connector is ABOVE us (too low), - = below us (too high)
-
-                // At connector altitude AND settled (held steady a moment) -> done. Lineup then does
-                // the final gyro alignment before the reverse.
-                if (System.Math.Abs(vErr) <= AltDeadband && _nav.Speed < NavSettleSpeed)
-                {
-                    _retries = 0;
                     _dockSub = DockLineup;
                     ResetLeg();
                     MyLog.Default.WriteLineAndConsole(string.Format(
-                        "[ColonyFramework] Mission {0}: at connector altitude (vErr {1:F1} m), lining up on axis", m.Id, vErr));
+                        "[ColonyFramework] Mission {0}: facing connector + stable, lining up", m.Id));
                 }
-                else
-                {
-                    // Failsafe acquisition: drive ONLY the vertical axis to the connector altitude.
-                    // Overshot below (vErr>0): the target is above us, so the pilot fires up to BUMP
-                    // back up and hold; too high (vErr<0): it eases down. Either way it must SETTLE
-                    // inside the deadband before completing, so it can't blow straight through.
-                    Vector3D target = _nav.ConnectorPos + _nav.GravityUp * vErr; // altitude-matched, hold horizontal
-                    double dsat = _bore.Navigate(grid, _nav, target, DockDescendSpeed * _dockSpeedScale, AltDeadband, NavVelDeadband);
-                    Narrate(m, vErr > AltDeadband ? "dock/bumpup" : "dock/descend", bPos, dsat);
-                    if ((DateTime.UtcNow - _lastDescendDbg).TotalSeconds >= 3)
-                    {
-                        _lastDescendDbg = DateTime.UtcNow;
-                        MyLog.Default.WriteLineAndConsole(string.Format(
-                            "[ColonyFramework] Mission {0}: descend-ctl vErr={1:F1} vCap={2:F2} vDes={3:F2} vAct={4:F2} g={5:F1} mass={6:F0} maxSpd={7:F2} sat={8:F2}",
-                            m.Id, _bore.DbgVErr, _bore.DbgVCap, _bore.DbgVDes, _bore.DbgVAct, _bore.DbgGMag, _nav.Mass, DockDescendSpeed * _dockSpeedScale, dsat));
-                    }
-                    if (DockWatch(System.Math.Abs(vErr))) { DockFallback(colony, m, grid, "dock descend stuck"); return; }
-                }
+                else { string fail = LegOk(vel.Length(), DockTimeoutSecs, "dock align"); if (fail != null) { DockFallback(colony, m, grid, fail); return; } }
             }
             else if (_dockSub == DockLineup || _dockSub == DockReverse)
             {
-                // DAMPENERS OFF, per-axis pilot. Heading held by FaceHold (with a deadband so it stops
-                // micro-correcting). LINEUP moves horizontally onto the connector axis at standoff
-                // while the pilot HOLDS altitude; REVERSE then backs straight in along the axis, still
-                // holding altitude. Overspeed/stuck fall back to the safe standoff.
-                if (_nav.Speed > DockMaxSafeSpeed) { DockFallback(colony, m, grid, string.Format("dock overspeed ({0:F0} m/s)", _nav.Speed)); return; }
+                // DAMPENERS STAY ON. The game's dampeners hold altitude (power-safe — the drone hovers
+                // fine) while we only NUDGE it horizontally with thrust: sideways onto the connector
+                // axis (lineup), then back onto the connector (reverse). The dampeners cap the speed
+                // and the connector magnet finishes the mate. "Thrusters like a damper": let the game
+                // damper do the hard part, we just bias the gentle horizontal creep.
+                var rc = DroneUtil.FindRc(grid);
+                if (rc != null && !rc.DampenersOverride) rc.DampenersOverride = true;
                 if (droneCon.Status == MyShipConnectorStatus.Connected) { BeginUnload(m, grid); return; }
                 if (droneCon.Status == MyShipConnectorStatus.Connectable) droneCon.Connect();
-
-                _bore.FaceHold(grid, dFwd, -bFwd, AlignHoldDot); // hold the drone connector aimed at the base connector
+                _bore.FaceHold(grid, dFwd, -bFwd, AlignHoldDot); // hold facing
+                _bore.ClearThrust(grid);                         // clean slate; dampers control all but our nudge
 
                 if (_dockSub == DockLineup)
                 {
-                    Vector3D target = bPos + bFwd * StageFwd;            // on-axis staging point, connector altitude
-                    double lsat = _bore.Navigate(grid, _nav, target, DockDescendSpeed * _dockSpeedScale, DockLateralTol, NavVelDeadband);
-                    double distH = _nav.HorizontalTo(target).Length();
-                    Narrate(m, "dock/lineup", target, lsat);
+                    Vector3D onAxis = bPos + bFwd * StageFwd;     // staging point on the connector axis
+                    Vector3D toAxis = _nav.HorizontalTo(onAxis);
+                    double distH = toAxis.Length();
+                    Narrate(m, "dock/lineup", onAxis);
                     if (distH <= DockLateralTol && _nav.Speed < NavSettleSpeed)
                     {
                         _retries = 0;
                         _dockSub = DockReverse;
                         ResetLeg();
                         MyLog.Default.WriteLineAndConsole(string.Format(
-                            "[ColonyFramework] Mission {0}: lined up on axis (distH {1:F1} m), reversing in", m.Id, distH));
+                            "[ColonyFramework] Mission {0}: lined up (distH {1:F1} m), reversing in", m.Id, distH));
                     }
-                    else if (DockWatch(distH)) { DockFallback(colony, m, grid, "dock lineup stuck"); return; }
+                    else
+                    {
+                        if (distH > 1e-2) _bore.ThrustAlong(grid, toAxis / distH, CrawlSpeedMid, 0.6f); // nudge laterally onto the axis
+                        if (DockWatch(distH)) { DockFallback(colony, m, grid, "dock lineup stuck"); return; }
+                    }
                 }
                 else // DockReverse
                 {
-                    // Off-axis guard: if it drifts off the connector axis, re-line-up rather than
-                    // approach diagonally into the base.
-                    Vector3D rel = _nav.ConnectorPos - bPos;
-                    double along = Vector3D.Dot(rel, bFwd);
-                    double lateral = (rel - bFwd * along - _nav.GravityUp * Vector3D.Dot(rel, _nav.GravityUp)).Length();
-                    if (lateral > DockLateralTol * 3) { _dockSub = DockLineup; ResetLeg(); return; }
-
-                    double rsat = _bore.Navigate(grid, _nav, bPos, CrawlSpeedFar * _dockSpeedScale, 0.05, NavVelDeadband); // drive onto the connector; magnet snaps at Connectable
-                    double distH = _nav.HorizontalTo(bPos).Length();
-                    Narrate(m, "dock/reverse", bPos, rsat);
-                    if (DockWatch(distH)) { DockFallback(colony, m, grid, "dock reverse stuck"); return; }
+                    Vector3D toCon = bPos - _nav.ConnectorPos;   // toward the base connector (mostly -bFwd)
+                    double dist = toCon.Length();
+                    Narrate(m, "dock/reverse", bPos);
+                    if (dist > 1e-2) _bore.ThrustAlong(grid, toCon / dist, CrawlSpeedNear, 0.6f); // nudge in; dampers hold altitude; magnet mates
+                    if (DockWatch(dist)) { DockFallback(colony, m, grid, "dock reverse stuck"); return; }
                 }
             }
             else // DockUnload

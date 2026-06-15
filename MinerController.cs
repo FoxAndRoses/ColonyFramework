@@ -83,14 +83,14 @@ namespace ColonyFramework
         // reference. 3 steps: fly over the connector (StageFwd out + StageUp up) → descend straight
         // down to connector altitude → reverse into the connector at tiered speed. Dampeners stay ON.
         private const double StageFwd        = 20.0; // m in front of the base connector — descend out here, NOT directly above it
-        private const double StageUp         = 20.0; // m above the base connector for the staging point (descent distance)
+        private const double StageUp         = 10.0; // m above the base connector for the staging point (descent distance)
         // Velocity-controlled descent: modAPI dampers OFF, our up-thrust modulated by descent rate to
         // hold a slow "barely descending" rate that eases to 0 at connector altitude (no toggling).
-        private const double DescendTargetRate   = 0.5;  // m/s — slow descent rate we hold ("barely descending")
+        private const double DescendTargetRate   = 0.3;  // m/s — slow descent rate we hold ("barely descending")
         private const double DescendEaseGain     = 0.2;  // target rate = min(DescendTargetRate, |vErr|*this) — eases to 0 near target
-        private const double DescendThrottleGain = 0.5;  // up-thrust (×weight) added per m/s of rate error
-        private const double DescendMinThrottle  = 0.6;  // never cut thrust below this (avoid a fast sink)
-        private const double DescendMaxThrottle  = 1.4;  // brake/climb ceiling (drone delivers what it can)
+        private const double DescendThrottleGain = 0.8;  // up-thrust (×weight) added per m/s of rate error
+        private const double DescendMinThrottle  = 0.7;  // never cut thrust below this (avoid a fast sink)
+        private const double DescendMaxThrottle  = 2.0;  // command up to 2× weight to brake (drone delivers what it can)
         private const double DescendBumpRate     = 0.3;  // if below target, climb at this rate (bump up)
         private const double DescendStuckSecs    = 30.0; // no altitude progress for this long → recover (lenient window)
         private const double DescendPanicSpeed   = 3.0;  // if descent exceeds this, hand to modAPI dampers (anti-slam)
@@ -157,6 +157,7 @@ namespace ColonyFramework
         private double _dockSpeedScale = 1.0; // soft failsafe: each dock retry crawls slower
         private double _descMinErr;           // closest altitude error reached in the descent (progress watchdog)
         private DateTime _descProgressTime;   // last time the descent got closer to connector altitude
+        private DateTime _lastTwrLog;         // throttle for the descent thrust-to-weight diagnostic
         private int _boreIndex;
         private bool _oriented;
         private DateTime _subStart;
@@ -945,6 +946,16 @@ namespace ColonyFramework
                                                        DescendMinThrottle, DescendMaxThrottle);
                     _bore.HoverThrottle(grid, _nav, throttle);
                     Narrate(m, vErr > AltDeadband ? "dock/bumpup" : "dock/descend", bPos);
+                    if ((DateTime.UtcNow - _lastTwrLog).TotalSeconds >= 3)
+                    {
+                        _lastTwrLog = DateTime.UtcNow;
+                        float ii; Vector3D gg = MyAPIGateway.Physics.CalculateNaturalGravityAt(_nav.Com, out ii);
+                        double weight = _nav.Mass * gg.Length();
+                        double upT = _bore.UpThrust(grid, _nav.GravityUp);
+                        MyLog.Default.WriteLineAndConsole(string.Format(
+                            "[ColonyFramework] Mission {0}: descend-ctl rate={1:F2} target={2:F2} throttle={3:F2} | upThrust={4:F0}N weight={5:F0}N TWR={6:F2}",
+                            m.Id, descentRate, rateTarget, throttle, upT, weight, weight > 0 ? upT / weight : 0));
+                    }
 
                     // Lenient altitude-progress watchdog (continuous descent makes steady progress).
                     double aerr = System.Math.Abs(vErr);

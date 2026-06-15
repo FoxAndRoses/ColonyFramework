@@ -89,7 +89,7 @@ namespace ColonyFramework
         private const double DescendTargetRate   = 0.3;  // m/s — slow descent rate we hold ("barely descending")
         private const double DescendEaseGain     = 0.2;  // target rate = min(DescendTargetRate, |vErr|*this) — eases to 0 near target
         private const double DescendThrottleGain = 0.8;  // up-thrust (×weight) added per m/s of rate error
-        private const double DescendMinThrottle  = 0.7;  // never cut thrust below this (avoid a fast sink)
+        private const double DescendMinThrottle  = 0.92; // gentle sink only (~0.8 m/s²) so it never builds speed it must hard-brake
         private const double DescendMaxThrottle  = 2.0;  // command up to 2× weight to brake (drone delivers what it can)
         private const double DescendBumpRate     = 0.3;  // if below target, climb at this rate (bump up)
         private const double DescendStuckSecs    = 30.0; // no altitude progress for this long → recover (lenient window)

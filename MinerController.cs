@@ -84,9 +84,16 @@ namespace ColonyFramework
         // down to connector altitude → reverse into the connector at tiered speed. Dampeners stay ON.
         private const double StageFwd        = 20.0; // m in front of the base connector — descend out here, NOT directly above it
         private const double StageUp         = 20.0; // m above the base connector for the staging point (descent distance)
-        private const double DescendPulseSpeed = 1.5; // m/s cap per descent pulse — small enough the dampeners CAN arrest it
-        private const double DescendBias     = 0.15; // gentle sink: up-thrust = (1-bias)*weight during a pulse
-        private const double DescendPanicSpeed = 3.0; // if descent exceeds this, force the modAPI dampers on (anti-slam)
+        // Velocity-controlled descent: modAPI dampers OFF, our up-thrust modulated by descent rate to
+        // hold a slow "barely descending" rate that eases to 0 at connector altitude (no toggling).
+        private const double DescendTargetRate   = 0.5;  // m/s — slow descent rate we hold ("barely descending")
+        private const double DescendEaseGain     = 0.2;  // target rate = min(DescendTargetRate, |vErr|*this) — eases to 0 near target
+        private const double DescendThrottleGain = 0.5;  // up-thrust (×weight) added per m/s of rate error
+        private const double DescendMinThrottle  = 0.6;  // never cut thrust below this (avoid a fast sink)
+        private const double DescendMaxThrottle  = 1.4;  // brake/climb ceiling (drone delivers what it can)
+        private const double DescendBumpRate     = 0.3;  // if below target, climb at this rate (bump up)
+        private const double DescendStuckSecs    = 30.0; // no altitude progress for this long → recover (lenient window)
+        private const double DescendPanicSpeed   = 3.0;  // if descent exceeds this, hand to modAPI dampers (anti-slam)
         private const double DockMoveSpeed   = 6.0;  // cruise cap flying over to the staging point
         private const double DockArriveTol   = 3.0;  // arrival tolerance at the staging / altitude points
         private const double DockSettleSpeed = 0.5;  // m/s "settled" threshold before advancing a leg
@@ -148,7 +155,8 @@ namespace ColonyFramework
         private DateTime _recoverStart;
         private DateTime _lastGroundAvoid; // throttle for mid-cruise climb re-engages
         private double _dockSpeedScale = 1.0; // soft failsafe: each dock retry crawls slower
-        private bool _descBrake;              // pulsed descent: true while dampeners arrest the last pulse
+        private double _descMinErr;           // closest altitude error reached in the descent (progress watchdog)
+        private DateTime _descProgressTime;   // last time the descent got closer to connector altitude
         private int _boreIndex;
         private bool _oriented;
         private DateTime _subStart;
@@ -889,11 +897,11 @@ namespace ColonyFramework
                 if (a > DockAlignDot && vel.Length() < DockSettleSpeed)
                 {
                     _retries = 0; // sub-state advanced — progress
-                    _descBrake = false;
+                    _descMinErr = double.MaxValue; _descProgressTime = DateTime.UtcNow;
                     _dockSub = DockDescend;
                     ResetLeg();
                     MyLog.Default.WriteLineAndConsole(string.Format(
-                        "[ColonyFramework] Mission {0}: facing connector + stable, descending in pulses", m.Id));
+                        "[ColonyFramework] Mission {0}: facing connector + stable, descending (rate-controlled)", m.Id));
                 }
                 else { string fail = LegOk(vel.Length(), DockTimeoutSecs, "dock align"); if (fail != null) { DockFallback(colony, m, grid, fail); return; } }
             }
@@ -906,49 +914,43 @@ namespace ColonyFramework
                 // the facing throughout.
                 _bore.FaceHold(grid, dFwd, -bFwd, AlignHoldDot);
                 var rc = DroneUtil.FindRc(grid);
-                double vErr = _nav.VerticalError(bPos);   // <0 = connector below us (descend), >0 = below target
-                double descSpeed = -_nav.VertSpeed;       // >0 = descending
-                if (descSpeed > DescendPanicSpeed) _descBrake = true; // runaway -> force the dampers on
+                double vErr = _nav.VerticalError(bPos);   // <0 = connector below us (too high), >0 = connector above us (too low)
+                double descentRate = -_nav.VertSpeed;     // >0 = descending
 
                 if (System.Math.Abs(vErr) <= AltDeadband && _nav.Speed < NavSettleSpeed)
                 {
+                    // At connector altitude + settled -> our dampers OFF, modAPI dampers ON to hold.
                     if (rc != null) rc.DampenersOverride = true; _bore.ClearThrust(grid);
-                    _retries = 0; _descBrake = false; _dockSub = DockLineup; ResetLeg();
+                    _retries = 0; _dockSub = DockLineup; ResetLeg();
                     MyLog.Default.WriteLineAndConsole(string.Format(
                         "[ColonyFramework] Mission {0}: at connector altitude (vErr {1:F1} m), lining up", m.Id, vErr));
                 }
-                else if (_descBrake)
+                else if (descentRate > DescendPanicSpeed)
                 {
-                    // modAPI dampers ON and OUR thrust RELEASED — the game dampers must have FULL
-                    // authority to arrest (leftover overrides fighting them was the slam).
-                    if (rc != null) rc.DampenersOverride = true;
-                    _bore.ClearThrust(grid);
-                    Narrate(m, "dock/brake", bPos);
-                    if (_nav.Speed < NavSettleSpeed) _descBrake = false; // arrested -> re-check / next pulse
-                    else if (DockWatch(System.Math.Abs(vErr))) { DockFallback(colony, m, grid, "dock brake stuck"); return; }
-                }
-                else if (vErr < -AltDeadband)                             // above target -> short controlled sink
-                {
-                    double pulseSpeed = System.Math.Min(DescendPulseSpeed * _dockSpeedScale,
-                                                        System.Math.Max(0.4, System.Math.Abs(vErr) * 0.5));
-                    if (descSpeed >= pulseSpeed)
-                    {
-                        if (rc != null) rc.DampenersOverride = true; _bore.ClearThrust(grid); // hand to dampers to arrest
-                        _descBrake = true;
-                    }
-                    else
-                    {
-                        if (rc != null) rc.DampenersOverride = false;     // DAMPENERS OFF: OUR gentle controlled sink
-                        _bore.HoverThrottle(grid, _nav, 1.0 - DescendBias);
-                    }
-                    Narrate(m, "dock/descend", bPos);
-                    if (DockWatch(System.Math.Abs(vErr))) { DockFallback(colony, m, grid, "dock descend stuck"); return; }
-                }
-                else                                                     // overshot below -> hold on dampers (can't burst-climb)
-                {
+                    // Runaway safety: hand to the modAPI dampers (full authority — our thrust released).
                     if (rc != null) rc.DampenersOverride = true; _bore.ClearThrust(grid);
-                    Narrate(m, "dock/hold", bPos);
-                    if (DockWatch(System.Math.Abs(vErr))) { DockFallback(colony, m, grid, "dock overshot below"); return; }
+                    Narrate(m, "dock/panic-brake", bPos);
+                }
+                else
+                {
+                    // OUR dampener: modAPI dampers OFF, modulate up-thrust by descent RATE to hold a
+                    // slow "barely descending" rate that eases to ~0 at connector altitude. Above target
+                    // -> descend slowly; below target -> bump up. No toggling — one continuous override.
+                    if (rc != null) rc.DampenersOverride = false;
+                    double rateTarget = vErr < -AltDeadband
+                        ? System.Math.Min(DescendTargetRate, System.Math.Abs(vErr) * DescendEaseGain) // descend (eased near target)
+                        : -DescendBumpRate;                                                            // below target -> climb (bump up)
+                    // up-thrust about hover: descending faster than target -> more thrust; slower -> less
+                    double throttle = MathHelper.Clamp(1.0 + (descentRate - rateTarget) * DescendThrottleGain,
+                                                       DescendMinThrottle, DescendMaxThrottle);
+                    _bore.HoverThrottle(grid, _nav, throttle);
+                    Narrate(m, vErr > AltDeadband ? "dock/bumpup" : "dock/descend", bPos);
+
+                    // Lenient altitude-progress watchdog (continuous descent makes steady progress).
+                    double aerr = System.Math.Abs(vErr);
+                    if (aerr < _descMinErr - LegProgressEps) { _descMinErr = aerr; _descProgressTime = DateTime.UtcNow; }
+                    else if ((DateTime.UtcNow - _descProgressTime).TotalSeconds > DescendStuckSecs)
+                    { DockFallback(colony, m, grid, "dock descend no progress"); return; }
                 }
             }
             else if (_dockSub == DockLineup || _dockSub == DockReverse)

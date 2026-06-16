@@ -92,6 +92,11 @@ namespace ColonyFramework
         private const double ShimmyTop  = 25.0; // m above connector the diagonal approach delivers us to (top of the shimmy)
         private const double ShimmyDrop = 5.0;  // m of altitude dropped per shimmy leg
         private const double ShimmyStep = 8.0;  // m of horizontal zig-zag per leg (slope = atan(Drop/Step) ≈ 32°, autopilot-friendly)
+        // Reverse-into-connector failsafe: a slow creep, so it fails ONLY on overshoot or bump-fail.
+        private const double ReverseSpeed     = 1.0; // m/s firm backward creep toward the connector
+        private const double ReverseOvershoot = 5.0; // m past the closest approach = flew past the connector → retry
+        private const double BumpDist         = 3.0; // m connector-to-connector that counts as "at the connector" (magnet range)
+        private const double BumpFailSecs     = 15.0;// at the connector this long without locking → bump failed → retry
         // Velocity-controlled descent: modAPI dampers OFF, our up-thrust modulated by descent rate to
         // hold a slow "barely descending" rate that eases to 0 at connector altitude (no toggling).
         private const double DescendTargetRate   = 0.3;  // m/s — slow descent rate we hold ("barely descending")
@@ -154,6 +159,7 @@ namespace ColonyFramework
         private bool _shimmyOut;      // current shimmy leg's zig-zag side (out = StageFwd+ShimmyStep)
         private long _dockConnectorId;
         private DateTime _dockStart;
+        private DateTime _bumpStart;  // when the reverse first reached the connector (for bump-fail detection)
         private DateTime _unloadStart;
         private DateTime _lastDockLog;
         private DateTime _legStart;   // start time of the current autopilot leg (transit / return)
@@ -944,7 +950,9 @@ namespace ColonyFramework
                 {
                     _retries = 0;
                     _dockSub = DockReverse;
-                    ResetLeg();
+                    ResetLeg();                          // resets _legMinDist (closest-approach tracker)
+                    _dockStart = DateTime.UtcNow;        // give the reverse its own generous time budget
+                    _bumpStart = default(DateTime);
                     MyLog.Default.WriteLineAndConsole(string.Format(
                         "[ColonyFramework] Mission {0}: facing connector + stable, reversing in (dampeners ON)", m.Id));
                 }
@@ -952,21 +960,32 @@ namespace ColonyFramework
             }
             else if (_dockSub == DockReverse)
             {
-                // DAMPENERS ON the whole time — they cancel gravity, hold altitude, and cap speed. Gyro
-                // holds the facing; a gentle nudge toward the connector eases the drone DOWN-AND-IN
-                // (DockClearance down + StageFwd back). The connector magnet finishes the mate. This is
-                // the only motion down to the low connector, and it's done with dampeners as the net.
+                // DAMPENERS ON the whole time — they cancel gravity and hold altitude. Gyro holds the
+                // facing; a firm nudge backs the drone toward the connector (~horizontal) and the magnet
+                // mates it. This is a deliberately slow creep, so it is NOT failed on "no progress" —
+                // only TARGET OVERSHOOT (flew past the connector) or BUMP FAILED (reached the connector
+                // but it won't lock) triggers a retry; otherwise it keeps creeping in.
                 var rc = DroneUtil.FindRc(grid);
                 if (rc != null && !rc.DampenersOverride) rc.DampenersOverride = true;
                 if (droneCon.Status == MyShipConnectorStatus.Connected) { BeginUnload(m, grid); return; }
                 if (droneCon.Status == MyShipConnectorStatus.Connectable) droneCon.Connect();
 
                 _bore.Face(grid, dFwd, -bFwd); // hold the drone connector aimed at the base connector
-                Vector3D toCon = bPos - dPos;  // toward the base connector (down + back)
+                Vector3D toCon = bPos - dPos;  // toward the base connector
                 double dist = toCon.Length();
-                if (dist > 1e-2) _bore.ThrustAlong(grid, toCon / dist, CrawlSpeedNear, 0.6f); // gentle nudge; dampers hold/cap; magnet mates
+                if (dist > 1e-2) _bore.ThrustAlong(grid, toCon / dist, ReverseSpeed, 1.0f); // firm nudge to overcome dampers + reach magnet range
                 DockTelemetry(m, "reverse", dist, vel.Length(), Vector3D.Dot(dFwd, -bFwd), 0);
-                if (DockWatch(dist)) { DockFallback(colony, m, grid, "dock reverse stuck"); return; }
+
+                if (dist < _legMinDist) _legMinDist = dist;                               // track closest approach
+                if (dist > _legMinDist + ReverseOvershoot)                                // TARGET OVERSHOOT — flew past
+                { DockFallback(colony, m, grid, "dock reverse overshoot"); return; }
+                if (dist <= BumpDist)                                                     // at the connector...
+                {
+                    if (_bumpStart == default(DateTime)) _bumpStart = DateTime.UtcNow;
+                    else if ((DateTime.UtcNow - _bumpStart).TotalSeconds > BumpFailSecs)  // ...but it won't lock — BUMP FAILED
+                    { DockFallback(colony, m, grid, "dock bump failed (connector won't lock)"); return; }
+                }
+                else _bumpStart = default(DateTime);                                      // still approaching; reset the bump timer
             }
             else // DockUnload
             {

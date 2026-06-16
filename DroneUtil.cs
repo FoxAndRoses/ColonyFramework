@@ -78,6 +78,17 @@ namespace ColonyFramework
             return rc.TryGetPlanetElevation(MyPlanetElevation.Surface, out altitude);
         }
 
+        // Fuel/consumable inventories are NOT cargo: a reactor's uranium, gas tanks, and O2/H2
+        // generators hold fuel that mined ore never goes into and that can't be unloaded — counting
+        // them makes the drone read "not empty" forever (the "cargo transfer incomplete" lie).
+        private static bool IsCargoBlock(IMyCubeBlock fat)
+        {
+            if (fat is IMyReactor) return false;
+            if (fat is IMyGasTank) return false;
+            if (fat is IMyGasGenerator) return false;
+            return true;
+        }
+
         public static double CargoFill(IMyCubeGrid grid)
         {
             var blocks = new List<IMySlimBlock>();
@@ -86,7 +97,7 @@ namespace ColonyFramework
             for (int b = 0; b < blocks.Count; b++)
             {
                 var fat = blocks[b].FatBlock as IMyCubeBlock;
-                if (fat == null || !fat.HasInventory) continue;
+                if (fat == null || !fat.HasInventory || !IsCargoBlock(fat)) continue;
                 for (int i = 0; i < fat.InventoryCount; i++)
                 {
                     var inv = fat.GetInventory(i);
@@ -214,7 +225,7 @@ namespace ColonyFramework
                 for (int b = 0; b < blocks.Count; b++)
                 {
                     var fat = blocks[b].FatBlock as IMyCubeBlock;
-                    if (fat == null || !fat.HasInventory) continue;
+                    if (fat == null || !fat.HasInventory || !IsCargoBlock(fat)) continue; // skip reactor/fuel
                     for (int i = 0; i < fat.InventoryCount; i++)
                     {
                         var inv = fat.GetInventory(i);

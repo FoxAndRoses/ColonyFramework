@@ -927,7 +927,10 @@ namespace ColonyFramework
             var droneCon = DroneUtil.FindConnector(grid);
             if (baseCon == null || droneCon == null) { CompleteMission(colony, m, grid); return; }
 
-            if ((DateTime.UtcNow - _dockStart).TotalSeconds > DockTimeoutSecs)
+            // Dock timeout applies only while still trying to dock — NOT once locked (unloading/charging),
+            // where the drone is stationary on the connector and a long recharge must not trip a "failure".
+            if (_dockSub != DockUnload && _dockSub != DockCharge
+                && (DateTime.UtcNow - _dockStart).TotalSeconds > DockTimeoutSecs)
             {
                 DockFallback(colony, m, grid, "dock timeout");
                 return;

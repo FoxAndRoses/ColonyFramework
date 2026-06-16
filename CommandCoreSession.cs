@@ -31,6 +31,7 @@ namespace ColonyFramework
         private readonly Dictionary<long, IMyCubeBlock> _cores = new Dictionary<long, IMyCubeBlock>();
         private readonly ResourceTracker _resourceTracker = new ResourceTracker();
         private readonly DroneExecutor _executor = new DroneExecutor();
+        private readonly DispatchService _dispatch = new DispatchService();
 
         private int _tick;
         private long _scanTick;
@@ -113,6 +114,7 @@ namespace ColonyFramework
                 {
                     if (!colony.Active) continue;
                     _assignment.ValidateAndAssign(colony);
+                    _dispatch.AutoDispatchAssigned(colony); // autonomous: launch assigned missions (incl. a just-recharged drone's next one)
                 }
             }
 

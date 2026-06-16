@@ -163,7 +163,14 @@ namespace ColonyFramework
 
             if (text == "/colony dispatch")
             {
-                MyAPIGateway.Utilities.ShowMessage("Colony", _dispatch.DispatchFirstAssigned(colony));
+                // Enable autonomy: from now the colony auto-launches assigned missions for these drones
+                // (incl. each one's next mission after it recharges) until abort/recall parks them.
+                var assets = colony.Assets.Assets;
+                for (int i = 0; i < assets.Count; i++) assets[i].AutoDispatchEnabled = true;
+                int launched = _dispatch.AutoDispatchAssigned(colony);
+                MyAPIGateway.Utilities.ShowMessage("Colony", launched > 0
+                    ? string.Format("autonomous mining enabled — dispatched {0} drone(s)", launched)
+                    : "autonomous mining enabled — drones launch as missions are assigned");
                 return;
             }
 

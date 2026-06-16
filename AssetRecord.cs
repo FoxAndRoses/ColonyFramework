@@ -18,5 +18,6 @@ namespace ColonyFramework
         [ProtoMember(5)] public SerializableVector3D LastPosition;
         [ProtoMember(6)] public string Name;
         [ProtoMember(7)] public int OfflineTicks; // incremented each validation tick while entity missing; removed at threshold
+        [ProtoMember(8)] public bool AutoDispatchEnabled; // true = colony may auto-launch this drone's missions (set by /colony dispatch; cleared by abort/recall)
     }
 }

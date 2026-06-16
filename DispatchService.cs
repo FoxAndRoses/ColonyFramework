@@ -42,5 +42,33 @@ namespace ColonyFramework
             MyLog.Default.WriteLineAndConsole("[ColonyFramework] " + msg);
             return msg;
         }
+
+        // Autonomous dispatch: launch every Assigned mission whose asset is present and flyable (sets it
+        // InProgress → commissioning). Called each assignment cycle so a drone that just recharged and
+        // freed up gets its next mission without a manual /colony dispatch. Returns count launched.
+        public int AutoDispatchAssigned(Colony colony)
+        {
+            int launched = 0;
+            var ms = colony.Missions.Missions;
+            for (int i = 0; i < ms.Count; i++)
+            {
+                var mission = ms[i];
+                if (mission.Status != MissionStatus.Assigned) continue;
+
+                var asset = colony.Assets.GetByEntityId(mission.AssignedAssetId);
+                if (asset == null || !asset.AutoDispatchEnabled) continue; // autonomy not enabled / drone parked
+
+                var grid = MyAPIGateway.Entities.GetEntityById(mission.AssignedAssetId) as IMyCubeGrid;
+                if (grid == null || DroneUtil.FindRc(grid) == null) continue; // asset gone/unflyable — leave assigned
+
+                colony.Missions.SetInProgress(mission.Id);
+                mission.Phase = PhaseCommission;
+                launched++;
+                MyLog.Default.WriteLineAndConsole(string.Format(
+                    "[ColonyFramework] Auto-dispatching '{0}' for deposit {1} (mission {2})",
+                    grid.DisplayName, mission.TargetDepositId, mission.Id));
+            }
+            return launched;
+        }
     }
 }

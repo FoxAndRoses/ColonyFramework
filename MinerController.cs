@@ -32,6 +32,7 @@ namespace ColonyFramework
         private const int DockReverse  = 3; // dampeners ON: gentle down-and-in nudge; magnet mates
         private const int DockUnload   = 4; // locked: transfer cargo into the base, then complete
         private const int DockRecover  = 5; // a stage failed: fly back to the core standoff, then retry the dock
+        private const int DockCharge   = 6; // locked: recharge to ChargeReleasePct, then release and re-dispatch
 
         private const int BoreReposition = 0;
         private const int BoreDescend    = 1;
@@ -132,8 +133,11 @@ namespace ColonyFramework
         private const double CrawlSpeedMid   = 1.0;  // m/s   (5–10 m)
         private const double CrawlSpeedNear  = 0.25; // m/s   (<5 m, until bump)
         private const double DockLateralTol  = 0.15; // m off the connector axis tolerated before backing straight in (fine — the magnet needs near-coaxial)
+        private const double DockCenterEnter = 0.30; // m off-axis that (re)starts centering — hysteresis band 0.15..0.30 stops the frantic twitching
         private const double CenterGain      = 0.6;  // lateral shift speed = lateral * this → corrections go minute as it nears the axis
         private const double CenterMinSpeed  = 0.05; // m/s floor so minute lateral corrections still move the drone
+        private const double ChargeReleasePct  = 0.50; // recharge to at least this fraction before launching the next mission
+        private const double ChargeTimeoutSecs = 300;  // safety: don't wait forever to charge (base may be underpowered)
         private const double DockRunawayMargin = 4.0; // m past closest approach on a dampers-off dock leg = overshoot → recover
         private const double DockBelowTol     = 1.5;  // m below connector altitude tolerated before climbing back up
         private const double DockUnloadSecs  = 30.0; // max time to drain cargo once locked before completing anyway
@@ -164,6 +168,7 @@ namespace ColonyFramework
         private bool _ascendInit;          // shaft-climb stall tracker initialised this ascent
         private Vector3D _ascendRefPos;    // last position where the climb made vertical progress
         private DateTime _ascendProgressTime; // when it last climbed (drives tilt escalation + trap timeout)
+        private double _ascendTiltDeg;     // current nose-back tilt — ratchets up, HELD until clear of the shaft
 
         private int _boreSub;
         private int _retreatSub;
@@ -174,6 +179,8 @@ namespace ColonyFramework
         private DateTime _dockStart;
         private DateTime _bumpStart;  // when the reverse first pressed centered against the connector (for bump-fail detection)
         private DateTime _lastLockTry; // last time we attempted droneCon.Connect() (throttle, not every tick)
+        private bool _dockCentering;  // hysteresis: true while sliding onto the axis, false while backing in
+        private DateTime _chargeStart; // when post-unload recharge began
         private DateTime _unloadStart;
         private DateTime _lastDockLog;
         private DateTime _legStart;   // start time of the current autopilot leg (transit / return)
@@ -661,31 +668,35 @@ namespace ColonyFramework
         private bool ClimbShaft(IMyCubeGrid grid, Vector3D downDir, Vector3D drillFwd, Vector3D pos)
         {
             Vector3D up = -downDir;
-            if (!_ascendInit) { _ascendInit = true; _ascendRefPos = pos; _ascendProgressTime = DateTime.UtcNow; }
+            if (!_ascendInit) { _ascendInit = true; _ascendRefPos = pos; _ascendProgressTime = DateTime.UtcNow; _ascendTiltDeg = 0; }
             else if (Vector3D.Dot(pos - _ascendRefPos, up) > AscendProgressEps)
-            { _ascendRefPos = pos; _ascendProgressTime = DateTime.UtcNow; } // gained altitude → progress
+            { _ascendRefPos = pos; _ascendProgressTime = DateTime.UtcNow; } // gained altitude → progress (tilt is HELD, not reset)
 
             double stalledSecs = (DateTime.UtcNow - _ascendProgressTime).TotalSeconds;
             if (stalledSecs > AscendTrapSecs) return false; // no climb at all for 30s → trapped
 
-            // Default aim is straight down (nose into the shaft). The longer it's stalled, the further we
-            // pitch the nose back — toward the dorsal (top) side, which brings the lift thrusters upright.
-            double tiltDeg = System.Math.Min(AscendMaxTiltDeg,
+            // Tilt RATCHETS up the longer it's stalled, then HOLDS. The player saw it snap back to straight
+            // down the instant it gained a little altitude — losing the lift assist — then fall again. So
+            // once we've tilted to escape, keep that tilt until it's clear of the shaft (the altitude gate
+            // in the caller then hands off to RetreatLevel / BoreReposition, which level it out).
+            double want = System.Math.Min(AscendMaxTiltDeg,
                 AscendTiltStepDeg * System.Math.Floor(stalledSecs / AscendStallSecs));
-            Vector3D aim = downDir;
-            if (tiltDeg > 0.1)
+            if (want > _ascendTiltDeg) _ascendTiltDeg = want;
+
+            Vector3D aim = downDir; // default: nose straight into the shaft
+            if (_ascendTiltDeg > 0.1)
             {
                 Vector3D gu = grid.WorldMatrix.Up;                       // drone's dorsal direction
                 Vector3D horiz = gu - up * Vector3D.Dot(gu, up);        // its horizontal part (pitch plane)
                 if (horiz.LengthSquared() > 1e-4)
                 {
-                    horiz = Vector3D.Normalize(horiz);
-                    double r = tiltDeg * System.Math.PI / 180.0;
+                    horiz = Vector3D.Normalize(horiz);                   // pitch the nose back toward the dorsal side
+                    double r = _ascendTiltDeg * System.Math.PI / 180.0;
                     aim = Vector3D.Normalize(downDir * System.Math.Cos(r) + horiz * System.Math.Sin(r));
                 }
             }
             _bore.Drive(grid, drillFwd, aim, 0); // gyro holds the (possibly tilted) aim; no forward drive
-            _bore.ThrustAlong(grid, up, RetreatAscendSpeed, 1.0f, tiltDeg > 0.1 ? 0.5f : 0.9f); // max up-thrust
+            _bore.ThrustAlong(grid, up, RetreatAscendSpeed, 1.0f, _ascendTiltDeg > 0.1 ? 0.5f : 0.9f); // max up-thrust
             return true;
         }
 
@@ -1018,6 +1029,7 @@ namespace ColonyFramework
                     ResetLeg();                          // resets _legMinDist (closest-approach tracker)
                     _dockStart = DateTime.UtcNow;        // give the reverse its own generous time budget
                     _bumpStart = default(DateTime);
+                    _dockCentering = false;
                     MyLog.Default.WriteLineAndConsole(string.Format(
                         "[ColonyFramework] Mission {0}: facing connector + stable, reversing in (dampeners ON)", m.Id));
                 }
@@ -1065,8 +1077,13 @@ namespace ColonyFramework
                 //              faces even for a diagonal miss; speed scales with lateral so corrections go
                 //              MINUTE near the axis (no overshoot, fine enough for the magnet).
                 //  • centered → push along -bFwd straight down the axis, gentle as it nears; magnet mates.
+                // Hysteresis (DockLateralTol..DockCenterEnter) so it commits to one mode instead of
+                // twitching back and forth at the boundary — that flip-flop was the "frantic" look.
+                if (_dockCentering) { if (lateral <= DockLateralTol) _dockCentering = false; }
+                else if (lateral > DockCenterEnter) _dockCentering = true;
+
                 string leg;
-                if (lateral > DockLateralTol)
+                if (_dockCentering)
                 {
                     double shiftSpeed = System.Math.Min(CrawlSpeedNear, System.Math.Max(CenterMinSpeed, lateral * CenterGain));
                     _bore.ThrustAlong(grid, -offAxis / lateral, shiftSpeed, 1.0f, 0.5f);
@@ -1094,6 +1111,10 @@ namespace ColonyFramework
                 if (dist < _legMinDist) _legMinDist = dist;                               // track closest approach
                 if (dist > _legMinDist + ReverseOvershoot)                                // TARGET OVERSHOOT — flew past
                 { DockFallback(colony, m, grid, "dock reverse overshoot"); return; }
+            }
+            else if (_dockSub == DockCharge)
+            {
+                TickCharge(colony, m, grid);
             }
             else // DockUnload
             {
@@ -1161,6 +1182,48 @@ namespace ColonyFramework
                 m.Id, empty ? "complete" : "timed out", fill * 100));
             if (!MyAPIGateway.Utilities.IsDedicated)
                 MyAPIGateway.Utilities.ShowMessage("Colony", empty ? "Mining mission complete, cargo delivered" : "Docked; cargo transfer incomplete");
+            BeginCharge(m, grid); // stay locked and recharge before releasing for the next mission
+        }
+
+        // Cargo delivered: stay locked to the base and recharge the drone's batteries before launching
+        // it again, so it doesn't run flat mid-mission.
+        private void BeginCharge(Mission m, IMyCubeGrid grid)
+        {
+            DroneUtil.SetBatteriesRecharge(grid, true);
+            var rc = DroneUtil.FindRc(grid);
+            if (rc != null) rc.DampenersOverride = true; // remain held against the base while charging
+            _dockSub = DockCharge;
+            _chargeStart = DateTime.UtcNow;
+            MyLog.Default.WriteLineAndConsole(string.Format(
+                "[ColonyFramework] Mission {0}: recharging to {1:N0}% before next mission", m.Id, ChargeReleasePct * 100));
+        }
+
+        // Hold on the connector until charged to ChargeReleasePct (or a safety timeout), then drop the
+        // batteries back to auto, release the connector, and complete — freeing the asset so the colony
+        // assigns and auto-dispatches its next mining mission.
+        private void TickCharge(Colony colony, Mission m, IMyCubeGrid grid)
+        {
+            double charge = DroneUtil.MinBatteryCharge(grid);
+            bool charged = charge >= ChargeReleasePct;
+            bool timedOut = (DateTime.UtcNow - _chargeStart).TotalSeconds > ChargeTimeoutSecs;
+            if (!charged && !timedOut)
+            {
+                if ((DateTime.UtcNow - _lastDockLog).TotalSeconds >= 3)
+                {
+                    _lastDockLog = DateTime.UtcNow;
+                    MyLog.Default.WriteLineAndConsole(string.Format(
+                        "[ColonyFramework] Mission {0}: charging {1:N0}%", m.Id, charge * 100));
+                }
+                return;
+            }
+            DroneUtil.SetBatteriesRecharge(grid, false); // back to auto for flight
+            DroneUtil.ReleaseGrid(grid);                 // disconnect connector + unlock gear
+            if (!MyAPIGateway.Utilities.IsDedicated)
+                MyAPIGateway.Utilities.ShowMessage("Colony", string.Format(
+                    "Drone recharged ({0:N0}%), heading out for the next mission", charge * 100));
+            MyLog.Default.WriteLineAndConsole(string.Format(
+                "[ColonyFramework] Mission {0}: recharged to {1:N0}%{2}, released for next mission",
+                m.Id, charge * 100, timedOut ? " (charge timeout)" : ""));
             CompleteMission(colony, m, grid);
         }
 

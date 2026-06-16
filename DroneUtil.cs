@@ -174,6 +174,19 @@ namespace ColonyFramework
             for (int i = 0; i < drills.Count; i++) drills[i].Enabled = on;
         }
 
+        // Force all batteries to Recharge (pull power from the docked base) or back to Auto for flight.
+        public static void SetBatteriesRecharge(IMyCubeGrid grid, bool recharge)
+        {
+            var ts = MyAPIGateway.TerminalActionsHelper.GetTerminalSystemForGrid(grid);
+            if (ts == null) return;
+            var bats = new List<IMyBatteryBlock>();
+            ts.GetBlocksOfType(bats);
+            for (int i = 0; i < bats.Count; i++)
+                bats[i].ChargeMode = recharge
+                    ? Sandbox.ModAPI.Ingame.ChargeMode.Recharge
+                    : Sandbox.ModAPI.Ingame.ChargeMode.Auto;
+        }
+
         // Push all items from the drone's inventories into the base (through the locked connector's
         // conveyor network) — one pass per call. Returns true once the drone holds nothing.
         public static bool UnloadCargo(IMyCubeGrid drone, IMyShipConnector droneCon)

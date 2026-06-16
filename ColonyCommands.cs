@@ -12,7 +12,23 @@ namespace ColonyFramework
         private readonly ColonyRegistry _registry;
         private readonly OreScanner _scanner = new OreScanner();
         private readonly ResourceTracker _tracker = new ResourceTracker();
+        private readonly ProjectorReader _projectors = new ProjectorReader();
         private readonly DispatchService _dispatch = new DispatchService();
+
+        // Single source of truth for the help listing (keep in sync as commands are added).
+        private static readonly string[] HelpLines = {
+            "/colony help — list commands",
+            "/colony info — name, age, deposit count",
+            "/colony scan — scan ore near you",
+            "/colony missions — mission counts",
+            "/colony register — claim nearest drone as a miner",
+            "/colony assets — drone roster",
+            "/colony resources — ore / ingot / component stock",
+            "/colony build — projector blueprint vs stock (missing parts)",
+            "/colony dispatch — enable autonomous mining",
+            "/colony abort — stop all missions",
+            "/colony recall — bring drones home",
+        };
         private readonly DroneExecutor _executor;
 
         public ColonyCommands(ColonyRegistry registry, DroneExecutor executor) { _registry = registry; _executor = executor; }
@@ -37,8 +53,11 @@ namespace ColonyFramework
         {
             if (messageText == null) return;
             var text = messageText.Trim().ToLowerInvariant();
-            if (!text.StartsWith("/colony ")) return;
+            if (text != "/colony" && !text.StartsWith("/colony ")) return;
             sendToOthers = false;
+
+            // Help works without a colony, so handle it (and a bare "/colony") before resolving one.
+            if (text == "/colony" || text == "/colony help") { ShowHelp(); return; }
 
             string error;
             var colony = PlayerColony(out error);
@@ -59,6 +78,12 @@ namespace ColonyFramework
                     "ores: {0} ({1:N0}kg) | ingots: {2} ({3:N0}kg) | building materials: {4} ({5:N0})",
                     r.Ore.Count, r.Total(r.Ore), r.Ingots.Count, r.Total(r.Ingots),
                     r.Components.Count, r.Total(r.Components)));
+                return;
+            }
+
+            if (text == "/colony build")
+            {
+                HandleBuild(colony);
                 return;
             }
 
@@ -187,6 +212,55 @@ namespace ColonyFramework
                 MyAPIGateway.Utilities.ShowMessage("Colony", "recalling active drones");
                 return;
             }
+
+            // Unrecognised subcommand — show the help listing rather than silently ignoring it.
+            ShowHelp();
+        }
+
+        private void ShowHelp()
+        {
+            for (int i = 0; i < HelpLines.Length; i++)
+                MyAPIGateway.Utilities.ShowMessage("Colony", HelpLines[i]);
+        }
+
+        // Compare the projector blueprint's component bill-of-materials to current colony stock and report
+        // what's missing. Read-only: it does not queue assemblers or move anything (next increment).
+        private void HandleBuild(Colony colony)
+        {
+            var core = MyAPIGateway.Entities.GetEntityById(colony.State.CoreEntityId) as IMyCubeBlock;
+            if (core == null) { MyAPIGateway.Utilities.ShowMessage("Colony", "no colony core"); return; }
+
+            // Refresh stock first so the comparison is current (same as /colony resources).
+            _tracker.Scan(core.CubeGrid, colony.OwnerKey, colony.Resources, MyAPIGateway.Session.GameDateTime.Ticks);
+
+            int nProj, nBlocks;
+            var required = _projectors.RequiredComponents(core.CubeGrid, out nProj, out nBlocks);
+            if (nProj == 0) { MyAPIGateway.Utilities.ShowMessage("Colony", "no active projector found"); return; }
+
+            var have = colony.Resources.Components;
+            var missing = new List<string>();
+            double requiredTotal = 0, missingTotal = 0;
+            foreach (var kv in required)
+            {
+                requiredTotal += kv.Value;
+                double stock;
+                have.TryGetValue(kv.Key, out stock);
+                double shortBy = kv.Value - stock;
+                if (shortBy > 0)
+                {
+                    missing.Add(string.Format("{0:N0} {1}", shortBy, kv.Key));
+                    missingTotal += shortBy;
+                }
+            }
+
+            string summary = missing.Count == 0
+                ? string.Format("blueprint: {0} projector(s), {1} blocks — fully stocked", nProj, nBlocks)
+                : string.Format("blueprint: {0} projector(s), {1} blocks; missing: {2}", nProj, nBlocks, string.Join(", ", missing));
+            MyAPIGateway.Utilities.ShowMessage("Colony", summary);
+
+            VRage.Utils.MyLog.Default.WriteLineAndConsole(string.Format(
+                "[ColonyFramework] /colony build: {0} projector(s), {1} blocks; required {2} comp types ({3:N0}), missing {4} types ({5:N0})",
+                nProj, nBlocks, required.Count, requiredTotal, missing.Count, missingTotal));
         }
     }
 }

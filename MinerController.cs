@@ -94,6 +94,7 @@ namespace ColonyFramework
         private const double ShimmyStep = 8.0;  // m of horizontal zig-zag per leg (slope = atan(Drop/Step) ≈ 32°, autopilot-friendly)
         // Reverse-into-connector failsafe: a slow creep, so it fails ONLY on overshoot or bump-fail.
         private const double ReverseSpeed     = 1.0; // m/s firm backward creep toward the connector
+        private const double ReverseStep      = 2.0; // m inward along the axis we aim each tick (blends inward motion with lateral centring)
         private const double ReverseOvershoot = 5.0; // m past the closest approach = flew past the connector → retry
         private const double BumpDist         = 3.0; // m connector-to-connector that counts as "at the connector" (magnet range)
         private const double BumpFailSecs     = 15.0;// at the connector this long without locking → bump failed → retry
@@ -980,24 +981,19 @@ namespace ColonyFramework
                 double lateral = offAxis.Length();
                 double dist = rel.Length();                      // connector-to-connector distance
 
-                // If off-axis (e.g., bumped to the right), HOVER at standoff and slide sideways/up onto
-                // the axis FIRST; only once centered do we back straight in — so the connectors meet
-                // square instead of at an angle. Dampeners stay ON (hold the rest); the magnet locks.
-                Vector3D target; string leg;
-                if (lateral > DockLateralTol)
-                {
-                    target = bPos + bFwd * System.Math.Max(along, BumpDist); // on-axis point at our standoff
-                    leg = "center";
-                }
-                else
-                {
-                    target = bPos;                                            // centered -> reverse straight in
-                    leg = "reverse";
-                }
+                // COAXIAL approach: aim at a point ON the axis, one ReverseStep closer than we are now.
+                // The nudge toward it carries BOTH an inward part (keeps closing on the connector) AND
+                // the full lateral correction (-offAxis), so the drone spirals onto the axis WHILE
+                // moving in and arrives square. Far off-axis → the lateral term dominates (center more);
+                // centered → nearly pure inward. This avoids both failure modes seen in the log: stalling
+                // at standoff trying to perfectly center first, and driving straight at bPos off-axis.
+                double aimAlong = System.Math.Max(0.0, along - ReverseStep);
+                Vector3D target = bPos + bFwd * aimAlong;        // on-axis, stepped inward
                 Vector3D toT = target - dPos;
                 double d = toT.Length();
                 if (d > 1e-2) _bore.ThrustAlong(grid, toT / d, ReverseSpeed, 1.0f);
-                DockTelemetry(m, leg, dist, vel.Length(), Vector3D.Dot(dFwd, -bFwd), lateral);
+                DockTelemetry(m, lateral > DockLateralTol ? "center" : "reverse",
+                    dist, vel.Length(), Vector3D.Dot(dFwd, -bFwd), 0.0, lateral);
 
                 if (dist < _legMinDist) _legMinDist = dist;                               // track closest approach
                 if (dist > _legMinDist + ReverseOvershoot)                                // TARGET OVERSHOOT — flew past

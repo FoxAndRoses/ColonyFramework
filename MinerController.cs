@@ -32,7 +32,7 @@ namespace ColonyFramework
         private const int DockReverse  = 3; // dampeners ON: gentle down-and-in nudge; magnet mates
         private const int DockUnload   = 4; // locked: transfer cargo into the base, then complete
         private const int DockRecover  = 5; // a stage failed: fly back to the core standoff, then retry the dock
-        private const int DockCharge   = 6; // locked: recharge to ChargeReleasePct, then release and re-dispatch
+        private const int DockCharge   = 6; // locked: recharge to the draw-derived target, then release and re-dispatch
 
         private const int BoreReposition = 0;
         private const int BoreDescend    = 1;
@@ -136,8 +136,13 @@ namespace ColonyFramework
         private const double DockCenterEnter = 0.30; // m off-axis that (re)starts centering — hysteresis band 0.15..0.30 stops the frantic twitching
         private const double CenterGain      = 0.6;  // lateral shift speed = lateral * this → corrections go minute as it nears the axis
         private const double CenterMinSpeed  = 0.05; // m/s floor so minute lateral corrections still move the drone
-        private const double ChargeReleasePct  = 0.50; // recharge to at least this fraction before launching the next mission
-        private const double ChargeTimeoutSecs = 300;  // safety: don't wait forever to charge (base may be underpowered)
+        // Post-unload recharge target is DERIVED from the commissioning power self-test (no fixed timer):
+        // the more the battery has to cover beyond the reactor, the higher we charge before re-dispatch.
+        private const double ChargeFloorPct      = 0.30; // never require less than this (also the default if no draw data)
+        private const double ChargeReserveFrac   = 0.15; // safety margin added on top of the computed need
+        private const double ChargeTargetMinutes = 10.0; // size the battery buffer for ~a mission's worth of full-load deficit
+        private const double ChargeProgressEps   = 0.01; // a 1% rise counts as charging progress (resets the stall timer)
+        private const double ChargeStallSecs     = 60.0; // charge plateaued this long → can't go higher, dispatch anyway (log it)
         private const double DockRunawayMargin = 4.0; // m past closest approach on a dampers-off dock leg = overshoot → recover
         private const double DockBelowTol     = 1.5;  // m below connector altitude tolerated before climbing back up
         private const double DockUnloadSecs  = 30.0; // max time to drain cargo once locked before completing anyway
@@ -180,7 +185,9 @@ namespace ColonyFramework
         private DateTime _bumpStart;  // when the reverse first pressed centered against the connector (for bump-fail detection)
         private DateTime _lastLockTry; // last time we attempted droneCon.Connect() (throttle, not every tick)
         private bool _dockCentering;  // hysteresis: true while sliding onto the axis, false while backing in
-        private DateTime _chargeStart; // when post-unload recharge began
+        private double _requiredChargePct = 0.5; // recharge target derived at commissioning from the power self-test
+        private double _chargeRefPct;  // last charge level that counted as progress (stall detection)
+        private DateTime _chargeProgressTime; // when the charge last rose (replaces the fixed charge timer)
         private DateTime _unloadStart;
         private DateTime _lastDockLog;
         private DateTime _legStart;   // start time of the current autopilot leg (transit / return)
@@ -255,39 +262,37 @@ namespace ColonyFramework
             }
         }
 
-        // ── Commission: spike consumers, estimate runtime, refuse if under reserve ──────────
+        // ── Commission: spike ALL thrusters + drills, measure the power draw, decide if the drone can
+        // run, and derive how much it must recharge after each mission (higher draw → higher target). ──
         private void TickCommission(Colony colony, Mission m, DepositRecord deposit, IMyCubeGrid grid)
         {
-            if (DroneUtil.HasInfinitePower(grid))
-            {
-                MyLog.Default.WriteLineAndConsole(string.Format(
-                    "[ColonyFramework] Mission {0}: commissioned (reactor power), dispatching", m.Id));
-                EngageTransit(grid, deposit);
-                m.Phase = PhaseTransit;
-                return;
-            }
-
             if (!_commissionStarted)
             {
                 _commissionStarted = true;
                 _commissionStart = DateTime.UtcNow;
-                DroneUtil.SetSpike(grid, true);
+                DroneUtil.SetSpike(grid, true); // all thrusters + drills, for a real worst-case load reading
                 return;
             }
 
             if ((DateTime.UtcNow - _commissionStart).TotalSeconds < CommissionSpikeSecs) return;
 
-            double stored, output;
-            int batteries = DroneUtil.SumBatteryPower(grid, out stored, out output);
+            double stored, cap, reactorOut, batOut;
+            DroneUtil.MeasurePower(grid, out stored, out cap, out reactorOut, out batOut);
             DroneUtil.SetSpike(grid, false);
 
-            double runtimeMin = batteries == 0 ? 999.0
-                              : output > 0 ? (stored / output) * 60.0 : 0.0;
+            double drawMw = reactorOut + batOut;            // total consumption under full load
+            _requiredChargePct = ComputeRequiredCharge(batOut, cap); // batOut = battery's share = drain rate
 
-            if (runtimeMin >= MinRuntimeMinutes)
+            bool hasReactor = reactorOut > 0.0;             // a working reactor sustains the base load
+            double runtimeMin = batOut > 0 ? (stored / batOut) * 60.0 : 999.0;
+
+            if (hasReactor || runtimeMin >= MinRuntimeMinutes)
             {
                 MyLog.Default.WriteLineAndConsole(string.Format(
-                    "[ColonyFramework] Mission {0}: commissioned: ~{1:F0} min runtime, dispatching", m.Id, runtimeMin));
+                    "[ColonyFramework] Mission {0}: commissioned: draw ~{1:F2} MW (reactor {2:F2}, battery {3:F2}); {4} recharge target {5:F0}%, dispatching",
+                    m.Id, drawMw, reactorOut, batOut,
+                    hasReactor ? "reactor power," : string.Format("~{0:F0} min runtime,", runtimeMin),
+                    _requiredChargePct * 100));
                 EngageTransit(grid, deposit);
                 m.Phase = PhaseTransit;
             }
@@ -296,6 +301,18 @@ namespace ColonyFramework
                 FailMission(colony, m, grid, string.Format(
                     "insufficient runtime ({0:F1} min < {1:F0}) — staying idle", runtimeMin, MinRuntimeMinutes));
             }
+        }
+
+        // How charged the drone must be before its next dispatch, from the self-test: the battery's
+        // share of the full-load draw (batMw) tells us its drain rate; size a ChargeTargetMinutes buffer
+        // against the battery capacity, plus a reserve. Reactor covers the load → batMw ~0 → just the floor.
+        private double ComputeRequiredCharge(double batMw, double batCapMwh)
+        {
+            if (batCapMwh <= 0) return ChargeFloorPct; // no batteries to charge
+            double frac = batMw * (ChargeTargetMinutes / 60.0) / batCapMwh + ChargeReserveFrac;
+            if (frac < ChargeFloorPct) frac = ChargeFloorPct;
+            if (frac > 1.0) frac = 1.0;
+            return frac;
         }
 
         private void EngageTransit(IMyCubeGrid grid, DepositRecord deposit)
@@ -1188,45 +1205,51 @@ namespace ColonyFramework
             BeginCharge(m, grid); // stay locked and recharge before releasing for the next mission
         }
 
-        // Cargo delivered: stay locked to the base and recharge the drone's batteries before launching
-        // it again, so it doesn't run flat mid-mission.
+        // Cargo delivered: stay locked to the base and recharge the drone's batteries to the
+        // self-test-derived target before launching it again, so it doesn't run flat mid-mission.
         private void BeginCharge(Mission m, IMyCubeGrid grid)
         {
             DroneUtil.SetBatteriesRecharge(grid, true);
             var rc = DroneUtil.FindRc(grid);
             if (rc != null) rc.DampenersOverride = true; // remain held against the base while charging
             _dockSub = DockCharge;
-            _chargeStart = DateTime.UtcNow;
+            _chargeRefPct = DroneUtil.MinBatteryCharge(grid);
+            _chargeProgressTime = DateTime.UtcNow;
             MyLog.Default.WriteLineAndConsole(string.Format(
-                "[ColonyFramework] Mission {0}: recharging to {1:N0}% before next mission", m.Id, ChargeReleasePct * 100));
+                "[ColonyFramework] Mission {0}: recharging to {1:N0}% before next mission", m.Id, _requiredChargePct * 100));
         }
 
-        // Hold on the connector until charged to ChargeReleasePct (or a safety timeout), then drop the
-        // batteries back to auto, release the connector, and complete — freeing the asset so the colony
-        // assigns and auto-dispatches its next mining mission.
+        // Hold on the connector until charged to the derived target (NO fixed timer). If charging
+        // plateaus — the base/reactor can't push it higher — log that the drone is underpowered and
+        // dispatch anyway rather than stranding it. Then release and complete, freeing the asset so the
+        // colony auto-dispatches its next mining mission.
         private void TickCharge(Colony colony, Mission m, IMyCubeGrid grid)
         {
             double charge = DroneUtil.MinBatteryCharge(grid);
-            bool charged = charge >= ChargeReleasePct;
-            bool timedOut = (DateTime.UtcNow - _chargeStart).TotalSeconds > ChargeTimeoutSecs;
-            if (!charged && !timedOut)
+            if (charge > _chargeRefPct + ChargeProgressEps) { _chargeRefPct = charge; _chargeProgressTime = DateTime.UtcNow; }
+
+            bool charged = charge >= _requiredChargePct;
+            bool stalled = (DateTime.UtcNow - _chargeProgressTime).TotalSeconds > ChargeStallSecs; // can't charge further
+            if (!charged && !stalled)
             {
                 if ((DateTime.UtcNow - _lastDockLog).TotalSeconds >= 3)
                 {
                     _lastDockLog = DateTime.UtcNow;
                     MyLog.Default.WriteLineAndConsole(string.Format(
-                        "[ColonyFramework] Mission {0}: charging {1:N0}%", m.Id, charge * 100));
+                        "[ColonyFramework] Mission {0}: charging {1:N0}% (target {2:N0}%)", m.Id, charge * 100, _requiredChargePct * 100));
                 }
                 return;
             }
             DroneUtil.SetBatteriesRecharge(grid, false); // back to auto for flight
             DroneUtil.ReleaseGrid(grid);                 // disconnect connector + unlock gear
+            bool underpowered = stalled && !charged;
             if (!MyAPIGateway.Utilities.IsDedicated)
-                MyAPIGateway.Utilities.ShowMessage("Colony", string.Format(
-                    "Drone recharged ({0:N0}%), heading out for the next mission", charge * 100));
-            MyLog.Default.WriteLineAndConsole(string.Format(
-                "[ColonyFramework] Mission {0}: recharged to {1:N0}%{2}, released for next mission",
-                m.Id, charge * 100, timedOut ? " (charge timeout)" : ""));
+                MyAPIGateway.Utilities.ShowMessage("Colony", underpowered
+                    ? string.Format("Drone underpowered — charge stalled at {0:N0}% (needs {1:N0}%), dispatching anyway", charge * 100, _requiredChargePct * 100)
+                    : string.Format("Drone recharged ({0:N0}%), heading out for the next mission", charge * 100));
+            MyLog.Default.WriteLineAndConsole(underpowered
+                ? string.Format("[ColonyFramework] Mission {0}: charge plateaued at {1:N0}% (target {2:N0}%) — drone underpowered, dispatching anyway", m.Id, charge * 100, _requiredChargePct * 100)
+                : string.Format("[ColonyFramework] Mission {0}: recharged to {1:N0}% (target {2:N0}%), released for next mission", m.Id, charge * 100, _requiredChargePct * 100));
             CompleteMission(colony, m, grid);
         }
 

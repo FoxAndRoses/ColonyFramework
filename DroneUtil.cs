@@ -155,6 +155,29 @@ namespace ColonyFramework
             return bats.Count;
         }
 
+        // Snapshot for the commissioning power self-test (taken with all consumers spiked via SetSpike):
+        // battery energy (stored / capacity, MWh) and the supply split (reactor vs battery output, MW).
+        // Under full load the battery's output is the deficit the reactor can't cover — i.e. how fast the
+        // battery would drain in a mission, which sizes how much we recharge before the next dispatch.
+        public static void MeasurePower(IMyCubeGrid grid, out double batteryStored, out double batteryMax,
+                                        out double reactorOutput, out double batteryOutput)
+        {
+            batteryStored = batteryMax = reactorOutput = batteryOutput = 0;
+            var ts = MyAPIGateway.TerminalActionsHelper.GetTerminalSystemForGrid(grid);
+            if (ts == null) return;
+            var bats = new List<IMyBatteryBlock>();
+            ts.GetBlocksOfType(bats);
+            for (int i = 0; i < bats.Count; i++)
+            {
+                batteryStored += bats[i].CurrentStoredPower;
+                batteryMax    += bats[i].MaxStoredPower;
+                batteryOutput += bats[i].CurrentOutput;
+            }
+            var reactors = new List<IMyReactor>();
+            ts.GetBlocksOfType(reactors);
+            for (int i = 0; i < reactors.Count; i++) reactorOutput += reactors[i].CurrentOutput;
+        }
+
         // Spike (on) or clear (off) all thrusters + drills — used for the commissioning power draw test.
         public static void SetSpike(IMyCubeGrid grid, bool on)
         {

@@ -971,21 +971,44 @@ namespace ColonyFramework
                 if (droneCon.Status == MyShipConnectorStatus.Connectable) droneCon.Connect();
 
                 _bore.Face(grid, dFwd, -bFwd); // hold the drone connector aimed at the base connector
-                Vector3D toCon = bPos - dPos;  // toward the base connector
-                double dist = toCon.Length();
-                if (dist > 1e-2) _bore.ThrustAlong(grid, toCon / dist, ReverseSpeed, 1.0f); // firm nudge to overcome dampers + reach magnet range
-                DockTelemetry(m, "reverse", dist, vel.Length(), Vector3D.Dot(dFwd, -bFwd), 0);
+
+                // Where is the drone connector relative to the base connector's AXIS (the line through
+                // bPos along bFwd)? We know this exactly from the two connectors' world positions.
+                Vector3D rel = dPos - bPos;
+                double along = Vector3D.Dot(rel, bFwd);          // how far out in front (>0)
+                Vector3D offAxis = rel - bFwd * along;           // sideways + vertical offset off the axis
+                double lateral = offAxis.Length();
+                double dist = rel.Length();                      // connector-to-connector distance
+
+                // If off-axis (e.g., bumped to the right), HOVER at standoff and slide sideways/up onto
+                // the axis FIRST; only once centered do we back straight in — so the connectors meet
+                // square instead of at an angle. Dampeners stay ON (hold the rest); the magnet locks.
+                Vector3D target; string leg;
+                if (lateral > DockLateralTol)
+                {
+                    target = bPos + bFwd * System.Math.Max(along, BumpDist); // on-axis point at our standoff
+                    leg = "center";
+                }
+                else
+                {
+                    target = bPos;                                            // centered -> reverse straight in
+                    leg = "reverse";
+                }
+                Vector3D toT = target - dPos;
+                double d = toT.Length();
+                if (d > 1e-2) _bore.ThrustAlong(grid, toT / d, ReverseSpeed, 1.0f);
+                DockTelemetry(m, leg, dist, vel.Length(), Vector3D.Dot(dFwd, -bFwd), lateral);
 
                 if (dist < _legMinDist) _legMinDist = dist;                               // track closest approach
                 if (dist > _legMinDist + ReverseOvershoot)                                // TARGET OVERSHOOT — flew past
                 { DockFallback(colony, m, grid, "dock reverse overshoot"); return; }
-                if (dist <= BumpDist)                                                     // at the connector...
+                if (dist <= BumpDist && lateral <= DockLateralTol)                        // at the connector AND centered...
                 {
                     if (_bumpStart == default(DateTime)) _bumpStart = DateTime.UtcNow;
                     else if ((DateTime.UtcNow - _bumpStart).TotalSeconds > BumpFailSecs)  // ...but it won't lock — BUMP FAILED
                     { DockFallback(colony, m, grid, "dock bump failed (connector won't lock)"); return; }
                 }
-                else _bumpStart = default(DateTime);                                      // still approaching; reset the bump timer
+                else _bumpStart = default(DateTime);                                      // still centering/approaching
             }
             else // DockUnload
             {

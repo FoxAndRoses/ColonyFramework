@@ -73,6 +73,13 @@ namespace ColonyFramework
         private const double RepoSpeed         = 2.0;
         private const double RepoTolerance     = 0.4;
         private const double RetreatAscendSpeed = 3.0;
+        // Climbing out of the shaft: if vertical progress stalls (underpowered with cargo), escalate —
+        // tilt the nose back in steps so lift thrusters add their upward component — then give up.
+        private const double AscendProgressEps = 0.5;  // m of climb that counts as progress (resets the stall timer)
+        private const double AscendStallSecs   = 5.0;  // every this-many seconds stalled, tilt back another step
+        private const double AscendTiltStepDeg = 5.0;  // degrees to tilt the nose back per stall step
+        private const double AscendMaxTiltDeg  = 45.0; // never tilt past this (stay mostly nose-down in the shaft)
+        private const double AscendTrapSecs    = 30.0; // no climb at all for this long → drone is trapped, give up
         private const double LevelDot           = 0.95; // drone "up" vs anti-gravity before heading home
         private const double ReturnClearanceAlt   = 30.0; // climb to this (m above surface) out of the shaft before returning
         private const double ReturnStandoffHeight = 100.0; // hold this far above the colony core (high, so the return cruise clears terrain)
@@ -154,6 +161,9 @@ namespace ColonyFramework
         private Vector3D _progressPos;
         private DateTime _progressTime;
         private bool _progressInit;
+        private bool _ascendInit;          // shaft-climb stall tracker initialised this ascent
+        private Vector3D _ascendRefPos;    // last position where the climb made vertical progress
+        private DateTime _ascendProgressTime; // when it last climbed (drives tilt escalation + trap timeout)
 
         private int _boreSub;
         private int _retreatSub;
@@ -600,6 +610,7 @@ namespace ColonyFramework
                     DroneUtil.SetDrills(grid, false);
                     _boreSub = BoreAscend;
                     _subStart = DateTime.UtcNow;
+                    ResetAscend();
                 }
                 else
                 {
@@ -608,8 +619,7 @@ namespace ColonyFramework
             }
             else // BoreAscend
             {
-                _bore.Drive(grid, drillFwd, downDir, 0);                       // hold nose-down
-                _bore.ThrustAlong(grid, -downDir, RetreatAscendSpeed, 1.0f);    // full-power climb (heavy with cargo)
+                if (!ClimbShaft(grid, downDir, drillFwd, pos)) { TrappedFail(colony, m, grid, pos); return; }
                 if (gotAlt && altitude >= ClearanceAlt)
                 {
                     _boreIndex++;
@@ -640,10 +650,61 @@ namespace ColonyFramework
                 BeginRetreat(m, grid, "timeout");
         }
 
+        // Reset the shaft-climb stall tracker at the start of each ascent (between bores or final retreat).
+        private void ResetAscend() { _ascendInit = false; }
+
+        // Drive the drone UP out of the shaft, escalating when it can't climb (e.g. underpowered with
+        // cargo, as the player saw — adding a thruster fixed it). Full up-thrust always; if vertical
+        // progress stalls, tilt the nose back AscendTiltStepDeg per AscendStallSecs so the lift thrusters
+        // gain an upward component (and the alignment gate loosens so off-axis thrusters add lift too).
+        // Returns false once there's been NO climb for AscendTrapSecs — the caller declares it trapped.
+        private bool ClimbShaft(IMyCubeGrid grid, Vector3D downDir, Vector3D drillFwd, Vector3D pos)
+        {
+            Vector3D up = -downDir;
+            if (!_ascendInit) { _ascendInit = true; _ascendRefPos = pos; _ascendProgressTime = DateTime.UtcNow; }
+            else if (Vector3D.Dot(pos - _ascendRefPos, up) > AscendProgressEps)
+            { _ascendRefPos = pos; _ascendProgressTime = DateTime.UtcNow; } // gained altitude → progress
+
+            double stalledSecs = (DateTime.UtcNow - _ascendProgressTime).TotalSeconds;
+            if (stalledSecs > AscendTrapSecs) return false; // no climb at all for 30s → trapped
+
+            // Default aim is straight down (nose into the shaft). The longer it's stalled, the further we
+            // pitch the nose back — toward the dorsal (top) side, which brings the lift thrusters upright.
+            double tiltDeg = System.Math.Min(AscendMaxTiltDeg,
+                AscendTiltStepDeg * System.Math.Floor(stalledSecs / AscendStallSecs));
+            Vector3D aim = downDir;
+            if (tiltDeg > 0.1)
+            {
+                Vector3D gu = grid.WorldMatrix.Up;                       // drone's dorsal direction
+                Vector3D horiz = gu - up * Vector3D.Dot(gu, up);        // its horizontal part (pitch plane)
+                if (horiz.LengthSquared() > 1e-4)
+                {
+                    horiz = Vector3D.Normalize(horiz);
+                    double r = tiltDeg * System.Math.PI / 180.0;
+                    aim = Vector3D.Normalize(downDir * System.Math.Cos(r) + horiz * System.Math.Sin(r));
+                }
+            }
+            _bore.Drive(grid, drillFwd, aim, 0); // gyro holds the (possibly tilted) aim; no forward drive
+            _bore.ThrustAlong(grid, up, RetreatAscendSpeed, 1.0f, tiltDeg > 0.1 ? 0.5f : 0.9f); // max up-thrust
+            return true;
+        }
+
+        // The shaft-climb gave up: announce where the drone trapped itself and fail the mission.
+        private void TrappedFail(Colony colony, Mission m, IMyCubeGrid grid, Vector3D pos)
+        {
+            MyLog.Default.WriteLineAndConsole(string.Format(
+                "[ColonyFramework] Mission {0}: ERROR drone trapped in shaft at {1:F0}, {2:F0}, {3:F0}", m.Id, pos.X, pos.Y, pos.Z));
+            if (!MyAPIGateway.Utilities.IsDedicated)
+                MyAPIGateway.Utilities.ShowMessage("Colony", string.Format(
+                    "Mining drone trapped itself at {0:F0}, {1:F0}, {2:F0}", pos.X, pos.Y, pos.Z));
+            FailMission(colony, m, grid, "trapped in shaft");
+        }
+
         private void BeginRetreat(Mission m, IMyCubeGrid grid, string reason)
         {
             DroneUtil.SetDrills(grid, false);
             _bore.Release(grid); // clear gyro + thrust overrides so retreat thrust takes effect
+            ResetAscend();
             _retreatSub = RetreatAscend;
             m.Phase = PhaseRetreat;
             MyLog.Default.WriteLineAndConsole(string.Format(
@@ -661,12 +722,12 @@ namespace ColonyFramework
 
             if (_retreatSub == RetreatAscend)
             {
-                // Reverse straight up out of the shaft: hold nose-down (so up-thrusters keep
-                // pointing up) and climb at FULL power (the drone is heavy with cargo).
+                // Reverse straight up out of the shaft at FULL power (heavy with cargo). ClimbShaft
+                // escalates (tilt back to engage lift thrusters) if it stalls, and trips "trapped" after
+                // AscendTrapSecs of no climb.
                 var drills = DroneUtil.FindDrills(grid);
                 Vector3D drillFwd = drills.Count > 0 ? drills[0].WorldMatrix.Forward : downDir;
-                _bore.Drive(grid, drillFwd, downDir, 0);
-                _bore.ThrustAlong(grid, -downDir, RetreatAscendSpeed, 1.0f);
+                if (!ClimbShaft(grid, downDir, drillFwd, pos)) { TrappedFail(colony, m, grid, pos); return; }
 
                 double alt;
                 bool clear = DroneUtil.TryGetAltitude(grid, out alt)

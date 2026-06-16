@@ -96,8 +96,8 @@ namespace ColonyFramework
         private const double ReverseSpeed     = 1.0; // m/s firm backward creep toward the connector
         private const double ReverseOvershoot = 5.0; // m past the closest approach = flew past the connector → retry
         private const double BumpDist         = 3.0; // m connector-to-connector that counts as "at the connector" (magnet range)
-        private const double ContactDebounceSecs = 0.6; // inward speed must stay stalled this long to count as a bump (filters bang-bang pulses)
-        private const double BumpFailSecs     = 15.0;// at the connector this long without locking → bump failed → retry
+        private const double BumpFailSecs     = 30.0;// centered & pressed this long without locking → bump failed → retry (time to fine-tune)
+        private const double LockTrySecs      = 1.5; // how often to attempt the connector lock (not every tick — that's far too fast)
         // Velocity-controlled descent: modAPI dampers OFF, our up-thrust modulated by descent rate to
         // hold a slow "barely descending" rate that eases to 0 at connector altitude (no toggling).
         private const double DescendTargetRate   = 0.3;  // m/s — slow descent rate we hold ("barely descending")
@@ -124,7 +124,9 @@ namespace ColonyFramework
         private const double CrawlSpeedFar   = 2.0;  // m/s   (>10 m)
         private const double CrawlSpeedMid   = 1.0;  // m/s   (5–10 m)
         private const double CrawlSpeedNear  = 0.25; // m/s   (<5 m, until bump)
-        private const double DockLateralTol  = 0.3;  // m off the connector axis we tolerate before reversing straight in
+        private const double DockLateralTol  = 0.15; // m off the connector axis tolerated before backing straight in (fine — the magnet needs near-coaxial)
+        private const double CenterGain      = 0.6;  // lateral shift speed = lateral * this → corrections go minute as it nears the axis
+        private const double CenterMinSpeed  = 0.05; // m/s floor so minute lateral corrections still move the drone
         private const double DockRunawayMargin = 4.0; // m past closest approach on a dampers-off dock leg = overshoot → recover
         private const double DockBelowTol     = 1.5;  // m below connector altitude tolerated before climbing back up
         private const double DockUnloadSecs  = 30.0; // max time to drain cargo once locked before completing anyway
@@ -160,8 +162,8 @@ namespace ColonyFramework
         private bool _shimmyOut;      // current shimmy leg's zig-zag side (out = StageFwd+ShimmyStep)
         private long _dockConnectorId;
         private DateTime _dockStart;
-        private DateTime _bumpStart;  // when the reverse first reached the connector (for bump-fail detection)
-        private DateTime _dockContactStart; // when inward speed first stalled at the connector (bump debounce)
+        private DateTime _bumpStart;  // when the reverse first pressed centered against the connector (for bump-fail detection)
+        private DateTime _lastLockTry; // last time we attempted droneCon.Connect() (throttle, not every tick)
         private DateTime _unloadStart;
         private DateTime _lastDockLog;
         private DateTime _legStart;   // start time of the current autopilot leg (transit / return)
@@ -955,7 +957,6 @@ namespace ColonyFramework
                     ResetLeg();                          // resets _legMinDist (closest-approach tracker)
                     _dockStart = DateTime.UtcNow;        // give the reverse its own generous time budget
                     _bumpStart = default(DateTime);
-                    _dockContactStart = default(DateTime);
                     MyLog.Default.WriteLineAndConsole(string.Format(
                         "[ColonyFramework] Mission {0}: facing connector + stable, reversing in (dampeners ON)", m.Id));
                 }
@@ -970,58 +971,68 @@ namespace ColonyFramework
                 // but it won't lock) triggers a retry; otherwise it keeps creeping in.
                 var rc = DroneUtil.FindRc(grid);
                 if (rc != null && !rc.DampenersOverride) rc.DampenersOverride = true;
+
+                // Try to LOCK occasionally (every LockTrySecs, NOT every tick): the instant the game
+                // reports the connectors aligned enough, take it. On success BeginUnload stops ALL
+                // maneuvering (Release clears thrust + gyro), keeps dampers ON, and drains cargo to base.
                 if (droneCon.Status == MyShipConnectorStatus.Connected) { BeginUnload(m, grid); return; }
-                if (droneCon.Status == MyShipConnectorStatus.Connectable) droneCon.Connect();
+                if (droneCon.Status == MyShipConnectorStatus.Connectable
+                    && (DateTime.UtcNow - _lastLockTry).TotalSeconds > LockTrySecs)
+                {
+                    _lastLockTry = DateTime.UtcNow;
+                    droneCon.Connect();
+                    if (droneCon.Status == MyShipConnectorStatus.Connected) { BeginUnload(m, grid); return; }
+                }
 
                 _bore.Face(grid, dFwd, -bFwd); // hold the drone connector aimed at the base connector
 
-                // Where is the drone connector relative to the base connector's AXIS (the line through
-                // bPos along bFwd)? We know this exactly from the two connectors' world positions.
+                // Decompose where the drone connector sits relative to the base connector AXIS (line
+                // through bPos along bFwd): along = distance out in front, offAxis = sideways+vertical miss.
                 Vector3D rel = dPos - bPos;
-                double along = Vector3D.Dot(rel, bFwd);          // how far out in front (>0)
-                Vector3D offAxis = rel - bFwd * along;           // sideways + vertical offset off the axis
+                double along = Vector3D.Dot(rel, bFwd);
+                Vector3D offAxis = rel - bFwd * along;
                 double lateral = offAxis.Length();
-                double dist = rel.Length();                      // connector-to-connector distance
+                double dist = rel.Length();
                 double inwardSpeed = Vector3D.Dot(vel, -bFwd);   // how fast we're closing along the axis
 
-                // BUMP RECOGNITION (same idea as the drill stalling on the surface: commanded motion +
-                // ~0 velocity = physical contact). If we're at the connector but our inward speed has
-                // died for ContactDebounceSecs, we're pressed against the housing — pushing backward
-                // harder just grinds. Debounced so the bang-bang thrust pulses don't read as contact.
-                if (dist <= BumpDist && inwardSpeed < ContactSpeedEps)
-                {
-                    if (_dockContactStart == default(DateTime)) _dockContactStart = DateTime.UtcNow;
-                }
-                else _dockContactStart = default(DateTime);
-                bool bumped = _dockContactStart != default(DateTime)
-                    && (DateTime.UtcNow - _dockContactStart).TotalSeconds > ContactDebounceSecs;
-
+                // CENTER-FIRST: whenever we're off the axis (at ANY distance) slide onto it BEFORE backing
+                // in. This kills both stalls seen in the logs — a big offset can't persist (the 5.4 m /
+                // lat 3 mid-air freeze) and the housings can't jam off-center before the faces meet (the
+                // lat 0.3 bump-fail). Both motions are CARDINAL for the aligned drone, so ThrustAlong
+                // always finds a thruster to fire (a diagonal toward bPos fired none → the freeze):
+                //  • off-axis → push along -offAxis (sideways/up); minAlign 0.5 fires the contributing
+                //              faces even for a diagonal miss; speed scales with lateral so corrections go
+                //              MINUTE near the axis (no overshoot, fine enough for the magnet).
+                //  • centered → push along -bFwd straight down the axis, gentle as it nears; magnet mates.
                 string leg;
-                if (bumped && lateral > DockLateralTol)
+                if (lateral > DockLateralTol)
                 {
-                    // Bumped off-center: STOP backing in, slide purely sideways/up onto the axis. minAlign
-                    // 0.5 so a diagonal (sideways+vertical) offset fires both contributing thruster faces.
-                    _bore.ThrustAlong(grid, -offAxis / lateral, CrawlSpeedNear, 1.0f, 0.5f);
+                    double shiftSpeed = System.Math.Min(CrawlSpeedNear, System.Math.Max(CenterMinSpeed, lateral * CenterGain));
+                    _bore.ThrustAlong(grid, -offAxis / lateral, shiftSpeed, 1.0f, 0.5f);
                     leg = "shift";
+                    _bumpStart = default(DateTime);                                       // still centering, not a lock-fail
                 }
                 else
                 {
-                    // Reverse straight in toward the connector; the magnet mates once we're coaxial.
-                    if (dist > 1e-2) _bore.ThrustAlong(grid, (bPos - dPos) / dist, ReverseSpeed, 1.0f);
+                    double rs = dist > CrawlFarDist ? CrawlSpeedFar : dist > CrawlMidDist ? CrawlSpeedMid : CrawlSpeedNear;
+                    _bore.ThrustAlong(grid, -bFwd, rs, 1.0f);
                     leg = "reverse";
+
+                    // BUMP/LOCK-FAIL: centered AND pressed against the connector (inward speed dead) but it
+                    // still won't lock — give it BumpFailSecs of occasional Connect() attempts, then retry.
+                    if (dist <= BumpDist && inwardSpeed < ContactSpeedEps)
+                    {
+                        if (_bumpStart == default(DateTime)) _bumpStart = DateTime.UtcNow;
+                        else if ((DateTime.UtcNow - _bumpStart).TotalSeconds > BumpFailSecs)
+                        { DockFallback(colony, m, grid, "dock bump failed (connector won't lock)"); return; }
+                    }
+                    else _bumpStart = default(DateTime);
                 }
                 DockTelemetry(m, leg, dist, vel.Length(), Vector3D.Dot(dFwd, -bFwd), inwardSpeed, lateral);
 
                 if (dist < _legMinDist) _legMinDist = dist;                               // track closest approach
                 if (dist > _legMinDist + ReverseOvershoot)                                // TARGET OVERSHOOT — flew past
                 { DockFallback(colony, m, grid, "dock reverse overshoot"); return; }
-                if (dist <= BumpDist && lateral <= DockLateralTol)                        // at the connector AND centered...
-                {
-                    if (_bumpStart == default(DateTime)) _bumpStart = DateTime.UtcNow;
-                    else if ((DateTime.UtcNow - _bumpStart).TotalSeconds > BumpFailSecs)  // ...but it won't lock — BUMP FAILED
-                    { DockFallback(colony, m, grid, "dock bump failed (connector won't lock)"); return; }
-                }
-                else _bumpStart = default(DateTime);                                      // still centering/approaching
             }
             else // DockUnload
             {
@@ -1096,7 +1107,7 @@ namespace ColonyFramework
         {
             if ((DateTime.UtcNow - _lastDockLog).TotalSeconds < 3) return;
             _lastDockLog = DateTime.UtcNow;
-            string latStr = lateral >= 0 ? string.Format(" lat={0:F1}", lateral) : "";
+            string latStr = lateral >= 0 ? string.Format(" lat={0:F2}", lateral) : "";
             MyLog.Default.WriteLineAndConsole(string.Format(
                 "[ColonyFramework] Mission {0}: dock[{1}] dist={2:F1} vel={3:F1} align={4:F2} thrustSat={5:F2}{6}",
                 m.Id, leg, dist, speed, alignDot, sat, latStr));

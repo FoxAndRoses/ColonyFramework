@@ -94,9 +94,9 @@ namespace ColonyFramework
         private const double ShimmyStep = 8.0;  // m of horizontal zig-zag per leg (slope = atan(Drop/Step) ≈ 32°, autopilot-friendly)
         // Reverse-into-connector failsafe: a slow creep, so it fails ONLY on overshoot or bump-fail.
         private const double ReverseSpeed     = 1.0; // m/s firm backward creep toward the connector
-        private const double ReverseStep      = 2.0; // m inward along the axis we aim each tick (blends inward motion with lateral centring)
         private const double ReverseOvershoot = 5.0; // m past the closest approach = flew past the connector → retry
         private const double BumpDist         = 3.0; // m connector-to-connector that counts as "at the connector" (magnet range)
+        private const double ContactDebounceSecs = 0.6; // inward speed must stay stalled this long to count as a bump (filters bang-bang pulses)
         private const double BumpFailSecs     = 15.0;// at the connector this long without locking → bump failed → retry
         // Velocity-controlled descent: modAPI dampers OFF, our up-thrust modulated by descent rate to
         // hold a slow "barely descending" rate that eases to 0 at connector altitude (no toggling).
@@ -161,6 +161,7 @@ namespace ColonyFramework
         private long _dockConnectorId;
         private DateTime _dockStart;
         private DateTime _bumpStart;  // when the reverse first reached the connector (for bump-fail detection)
+        private DateTime _dockContactStart; // when inward speed first stalled at the connector (bump debounce)
         private DateTime _unloadStart;
         private DateTime _lastDockLog;
         private DateTime _legStart;   // start time of the current autopilot leg (transit / return)
@@ -954,6 +955,7 @@ namespace ColonyFramework
                     ResetLeg();                          // resets _legMinDist (closest-approach tracker)
                     _dockStart = DateTime.UtcNow;        // give the reverse its own generous time budget
                     _bumpStart = default(DateTime);
+                    _dockContactStart = default(DateTime);
                     MyLog.Default.WriteLineAndConsole(string.Format(
                         "[ColonyFramework] Mission {0}: facing connector + stable, reversing in (dampeners ON)", m.Id));
                 }
@@ -980,20 +982,35 @@ namespace ColonyFramework
                 Vector3D offAxis = rel - bFwd * along;           // sideways + vertical offset off the axis
                 double lateral = offAxis.Length();
                 double dist = rel.Length();                      // connector-to-connector distance
+                double inwardSpeed = Vector3D.Dot(vel, -bFwd);   // how fast we're closing along the axis
 
-                // COAXIAL approach: aim at a point ON the axis, one ReverseStep closer than we are now.
-                // The nudge toward it carries BOTH an inward part (keeps closing on the connector) AND
-                // the full lateral correction (-offAxis), so the drone spirals onto the axis WHILE
-                // moving in and arrives square. Far off-axis → the lateral term dominates (center more);
-                // centered → nearly pure inward. This avoids both failure modes seen in the log: stalling
-                // at standoff trying to perfectly center first, and driving straight at bPos off-axis.
-                double aimAlong = System.Math.Max(0.0, along - ReverseStep);
-                Vector3D target = bPos + bFwd * aimAlong;        // on-axis, stepped inward
-                Vector3D toT = target - dPos;
-                double d = toT.Length();
-                if (d > 1e-2) _bore.ThrustAlong(grid, toT / d, ReverseSpeed, 1.0f);
-                DockTelemetry(m, lateral > DockLateralTol ? "center" : "reverse",
-                    dist, vel.Length(), Vector3D.Dot(dFwd, -bFwd), 0.0, lateral);
+                // BUMP RECOGNITION (same idea as the drill stalling on the surface: commanded motion +
+                // ~0 velocity = physical contact). If we're at the connector but our inward speed has
+                // died for ContactDebounceSecs, we're pressed against the housing — pushing backward
+                // harder just grinds. Debounced so the bang-bang thrust pulses don't read as contact.
+                if (dist <= BumpDist && inwardSpeed < ContactSpeedEps)
+                {
+                    if (_dockContactStart == default(DateTime)) _dockContactStart = DateTime.UtcNow;
+                }
+                else _dockContactStart = default(DateTime);
+                bool bumped = _dockContactStart != default(DateTime)
+                    && (DateTime.UtcNow - _dockContactStart).TotalSeconds > ContactDebounceSecs;
+
+                string leg;
+                if (bumped && lateral > DockLateralTol)
+                {
+                    // Bumped off-center: STOP backing in, slide purely sideways/up onto the axis. minAlign
+                    // 0.5 so a diagonal (sideways+vertical) offset fires both contributing thruster faces.
+                    _bore.ThrustAlong(grid, -offAxis / lateral, CrawlSpeedNear, 1.0f, 0.5f);
+                    leg = "shift";
+                }
+                else
+                {
+                    // Reverse straight in toward the connector; the magnet mates once we're coaxial.
+                    if (dist > 1e-2) _bore.ThrustAlong(grid, (bPos - dPos) / dist, ReverseSpeed, 1.0f);
+                    leg = "reverse";
+                }
+                DockTelemetry(m, leg, dist, vel.Length(), Vector3D.Dot(dFwd, -bFwd), inwardSpeed, lateral);
 
                 if (dist < _legMinDist) _legMinDist = dist;                               // track closest approach
                 if (dist > _legMinDist + ReverseOvershoot)                                // TARGET OVERSHOOT — flew past

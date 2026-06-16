@@ -29,7 +29,11 @@ namespace ColonyFramework
         // Bang-bang velocity control along an arbitrary world direction WITHOUT changing
         // orientation: overrides thrusters facing 'dir' to push while below targetSpeed,
         // releasing them (to dampers) at/above. Caller holds orientation via Drive(.., 0).
-        public void ThrustAlong(IMyCubeGrid grid, Vector3D dir, double targetSpeed, float power = 0.5f)
+        // Fire thrusters to travel along a world direction (dampeners handle the rest). Only thrusters
+        // whose push axis is within acos(minAlign) of 'dir' fire — so for a near-cardinal dir one face
+        // fires cleanly, while a diagonal dir needs a looser minAlign (~0.5) to fire both contributing
+        // faces (otherwise NO thruster qualifies and the ship doesn't move that way).
+        public void ThrustAlong(IMyCubeGrid grid, Vector3D dir, double targetSpeed, float power = 0.5f, float minAlign = 0.9f)
         {
             var ts = MyAPIGateway.TerminalActionsHelper.GetTerminalSystemForGrid(grid);
             if (ts == null || grid.Physics == null) return;
@@ -41,7 +45,7 @@ namespace ColonyFramework
             {
                 var t = thrusters[i];
                 double d = Vector3D.Dot(t.WorldMatrix.Backward, dir);
-                t.ThrustOverridePercentage = (push && d > 0.9) ? power : 0f;
+                t.ThrustOverridePercentage = (push && d > minAlign) ? power : 0f;
             }
         }
 

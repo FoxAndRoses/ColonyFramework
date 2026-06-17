@@ -671,7 +671,7 @@ namespace ColonyFramework
                     }
                     else
                     {
-                        BeginRetreat(m, grid, "cargo full of ore");
+                        BeginRetreat(m, grid, string.Format("cargo full (junk {0:P0} < {1:P0} threshold)", junkFrac, JunkDumpFrac));
                     }
                     return;
                 }

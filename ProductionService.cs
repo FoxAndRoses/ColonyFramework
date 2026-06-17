@@ -82,10 +82,9 @@ namespace ColonyFramework
                 else if (assemblers == 0)
                     Announce(colony, "have the materials but no working assembler to build the blueprint", false);
             }
-            else // short on ore -> announce + demand-driven mining
+            else // short on ore -> target it for mining (general mining already runs; this prioritises the gap)
             {
                 st.ReadySince = default(DateTime);
-                Announce(colony, "production paused: " + Summarize(status.MissingOre, " ore") + " — dispatching miners", false);
 
                 long tick = MyAPIGateway.Session.GameDateTime.Ticks;
                 var basePos = core.GetPosition();
@@ -93,17 +92,20 @@ namespace ColonyFramework
                 foreach (var kv in status.MissingOre)
                 {
                     var dep = colony.Deposits.FindNearestUnclaimed(basePos, kv.Key);
-                    if (dep == null) continue;
-                    if (colony.Missions.CreateMineMission(dep.Id, tick))
-                    {
-                        created++;
-                        MyLog.Default.WriteLineAndConsole(string.Format(
-                            "[ColonyFramework] production: short {0} ore, created mine mission for deposit {1}", kv.Key, dep.Id));
-                    }
+                    if (dep != null && colony.Missions.CreateMineMission(dep.Id, tick)) created++;
                 }
-                if (created == 0 && status.MissingOre.Count > 0)
+
+                // This branch runs every tick — throttle the chat AND log together so it doesn't flood.
+                if ((DateTime.UtcNow - st.LastChat).TotalSeconds >= ChatThrottleSecs)
+                {
+                    st.LastChat = DateTime.UtcNow;
+                    if (!MyAPIGateway.Utilities.IsDedicated)
+                        MyAPIGateway.Utilities.ShowMessage("Colony", "production waiting on ore: " + Summarize(status.MissingOre, "") + " — mining");
                     MyLog.Default.WriteLineAndConsole(string.Format(
-                        "[ColonyFramework] production: short ore {0} but no unclaimed deposit known for it", Summarize(status.MissingOre, "")));
+                        "[ColonyFramework] production: short ore {0}; {1}",
+                        Summarize(status.MissingOre, ""),
+                        created > 0 ? ("created " + created + " mine mission(s)") : "matching deposits already claimed/mining"));
+                }
             }
         }
 

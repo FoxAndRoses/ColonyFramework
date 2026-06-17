@@ -151,7 +151,7 @@ namespace ColonyFramework
 
         private const double CargoThreshold     = 0.80;
         private const double LowPowerThreshold  = 0.20;
-        private const double JunkDumpFrac       = 0.15; // if >=15% of the cargo's ore is Stone/Ice, dump it rather than haul it
+        private const double JunkDumpFrac       = 0.05; // dump when >=5% of the cargo's ore is Stone/Ice — eject it (nearly) fully rather than haul it; keep all real ore
         private const double DumpHoldSecs       = 8.0;  // max time to hold out of the shaft ejecting before re-entering
         private const double BoreTimeoutSeconds = 600;  // ceiling = 10-min runtime floor
         private const double AlignmentMinDot    = 0.7;

@@ -38,6 +38,7 @@ namespace ColonyFramework
         private const int BoreDescend    = 1;
         private const int BoreDrilling   = 2;
         private const int BoreAscend     = 3;
+        private const int BoreEjectDump  = 4; // backed out of the shaft, holding to dump ice/stone, then re-enters
 
         private const int RetreatAscend = 0; // reverse straight up out of the shaft
         private const int RetreatLevel  = 1; // pitch to horizontal/level before turning to head home
@@ -150,6 +151,8 @@ namespace ColonyFramework
 
         private const double CargoThreshold     = 0.80;
         private const double LowPowerThreshold  = 0.20;
+        private const double JunkDumpFrac       = 0.15; // if >=15% of the cargo's ore is Stone/Ice, dump it rather than haul it
+        private const double DumpHoldSecs       = 8.0;  // max time to hold out of the shaft ejecting before re-entering
         private const double BoreTimeoutSeconds = 600;  // ceiling = 10-min runtime floor
         private const double AlignmentMinDot    = 0.7;
         private const double StuckDistance      = 1.0;
@@ -207,6 +210,10 @@ namespace ColonyFramework
         private Vector3D _boreContact;
         private bool _depthSet;
         private double _targetDepth;
+        private bool _ejecting;        // mid-bore: backed out to dump ice/stone (don't advance the + index)
+        private bool _reentering;      // returning down the same shaft after a dump (resume drilling, keep _boreContact)
+        private double _ejectResumePen;// depth we left the bore at, to descend back to
+        private DateTime _ejectHoldStart; // when the dump hold began
 
         public void Advance(Colony colony, Mission m, DepositRecord deposit, IMyCubeGrid grid)
         {
@@ -516,6 +523,8 @@ namespace ColonyFramework
             _boreIndex = 0;
             _boreSub = BoreReposition;
             _subStart = DateTime.UtcNow;
+            _ejecting = false;
+            _reentering = false;
             m.Phase = PhaseMining;
             MyLog.Default.WriteLineAndConsole(string.Format(
                 "[ColonyFramework] Mission {0}: +-pattern bore at deposit {1}, {2} drills",
@@ -533,6 +542,9 @@ namespace ColonyFramework
                 double charge = DroneUtil.MinBatteryCharge(grid);
                 if (charge < LowPowerThreshold)
                 {
+                    if (!MyAPIGateway.Utilities.IsDedicated)
+                        MyAPIGateway.Utilities.ShowMessage("Colony", string.Format(
+                            "Drone low power ({0:N0}%), aborting to base to recharge", charge * 100));
                     BeginRetreat(m, grid, string.Format("low power ({0:N0}%)", charge * 100));
                     return;
                 }
@@ -602,7 +614,25 @@ namespace ColonyFramework
                     bool longEnough = (DateTime.UtcNow - _subStart).TotalSeconds > MinDescendSecs;
                     bool stalled = downSpeed < ContactSpeedEps;
                     bool tooDeep = gotAlt && altitude < SurfacePenetrationCap;
-                    if (longEnough && (stalled || tooDeep))
+
+                    if (_reentering)
+                    {
+                        // Returning down the EXISTING shaft after a dump: keep the original surface
+                        // _boreContact/_targetDepth so depth bookkeeping is unbroken; resume drilling once
+                        // we're back to where we left off (or we hit rock early).
+                        double pen = Vector3D.Dot(pos - _boreContact, downDir);
+                        if (pen >= _ejectResumePen || (longEnough && (stalled || tooDeep)))
+                        {
+                            _reentering = false;
+                            DroneUtil.SetDrills(grid, true);
+                            _boreSub = BoreDrilling;
+                            _subStart = DateTime.UtcNow;
+                            MyLog.Default.WriteLineAndConsole(string.Format(
+                                "[ColonyFramework] Mission {0}: eject — re-entered shaft, resuming bore {1} at {2:F1}m",
+                                m.Id, BoreName[_boreIndex], pen));
+                        }
+                    }
+                    else if (longEnough && (stalled || tooDeep))
                     {
                         _boreContact = pos;
                         if (!_depthSet)
@@ -622,10 +652,27 @@ namespace ColonyFramework
             }
             else if (_boreSub == BoreDrilling)
             {
-                if (DroneUtil.CargoFill(grid) >= CargoThreshold)
+                double totalFrac, junkFrac;
+                DroneUtil.OreFill(grid, deposit.OreType, out totalFrac, out junkFrac);
+                if (totalFrac >= CargoThreshold)
                 {
                     DroneUtil.SetDrills(grid, false);
-                    BeginRetreat(m, grid, "cargo 80%");
+                    if (junkFrac >= JunkDumpFrac)
+                    {
+                        // Cargo is clogged with ice/stone — back out, dump it, re-enter THIS shaft.
+                        _ejectResumePen = Vector3D.Dot(pos - _boreContact, downDir);
+                        _ejecting = true;
+                        _boreSub = BoreAscend;
+                        _subStart = DateTime.UtcNow;
+                        ResetAscend();
+                        MyLog.Default.WriteLineAndConsole(string.Format(
+                            "[ColonyFramework] Mission {0}: bore {1} eject — backing out to dump ice/stone (junk {2:P0})",
+                            m.Id, BoreName[_boreIndex], junkFrac));
+                    }
+                    else
+                    {
+                        BeginRetreat(m, grid, "cargo full of ore");
+                    }
                     return;
                 }
                 double pen = Vector3D.Dot(pos - _boreContact, downDir);
@@ -641,19 +688,48 @@ namespace ColonyFramework
                     _bore.Drive(grid, drillFwd, downDir, BoreDrillSpeed); // dampeners ON; crawl into rock
                 }
             }
-            else // BoreAscend
+            else if (_boreSub == BoreAscend)
             {
                 if (!ClimbShaft(grid, downDir, drillFwd, pos)) { TrappedFail(colony, m, grid, pos); return; }
                 if (gotAlt && altitude >= ClearanceAlt)
                 {
-                    _boreIndex++;
-                    if (_boreIndex >= DU.Length)
+                    if (_ejecting)
                     {
-                        BeginRetreat(m, grid, "+ pattern complete");
-                        return;
+                        // Backed clear of the shaft — hold here and dump ice/stone (don't advance the +).
+                        _boreSub = BoreEjectDump;
+                        _ejectHoldStart = DateTime.UtcNow;
+                        ResetAscend();
                     }
-                    _boreSub = BoreReposition;
+                    else
+                    {
+                        _boreIndex++;
+                        if (_boreIndex >= DU.Length)
+                        {
+                            BeginRetreat(m, grid, "+ pattern complete");
+                            return;
+                        }
+                        _boreSub = BoreReposition;
+                        _subStart = DateTime.UtcNow;
+                    }
+                }
+            }
+            else // BoreEjectDump
+            {
+                var con = DroneUtil.FindConnector(grid);
+                _bore.Drive(grid, drillFwd, downDir, 0); // hold position (dampers brake); connector faces up, ejects upward
+                if (con != null) con.ThrowOut = true;
+                double junkLeft = DroneUtil.MoveJunkToConnector(grid, con, deposit.OreType);
+                bool timedOut = (DateTime.UtcNow - _ejectHoldStart).TotalSeconds > DumpHoldSecs;
+                if (junkLeft <= 1e-3 || timedOut)
+                {
+                    if (con != null) con.ThrowOut = false;
+                    _ejecting = false;
+                    _reentering = true;
+                    _boreSub = BoreReposition;   // re-centre over the same + spot, then descend back in
                     _subStart = DateTime.UtcNow;
+                    MyLog.Default.WriteLineAndConsole(string.Format(
+                        "[ColonyFramework] Mission {0}: eject — dumped{1}, re-entering shaft to {2:F1}m",
+                        m.Id, timedOut ? " (hold timeout)" : "", _ejectResumePen));
                 }
             }
 
@@ -732,6 +808,10 @@ namespace ColonyFramework
         {
             DroneUtil.SetDrills(grid, false);
             _bore.Release(grid); // clear gyro + thrust overrides so retreat thrust takes effect
+            _ejecting = false;
+            _reentering = false;
+            var con = DroneUtil.FindConnector(grid);
+            if (con != null) con.ThrowOut = false; // never throw out valuable ore on the way home / at base
             ResetAscend();
             _retreatSub = RetreatAscend;
             m.Phase = PhaseRetreat;

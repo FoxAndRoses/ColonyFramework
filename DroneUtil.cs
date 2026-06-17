@@ -8,6 +8,7 @@ using IMyCubeGrid  = VRage.Game.ModAPI.IMyCubeGrid;
 using IMyCubeBlock = VRage.Game.ModAPI.IMyCubeBlock;
 using IMySlimBlock = VRage.Game.ModAPI.IMySlimBlock;
 using IMyInventory = VRage.Game.ModAPI.IMyInventory;
+using MyInventoryItem = VRage.Game.ModAPI.Ingame.MyInventoryItem;
 
 namespace ColonyFramework
 {
@@ -107,6 +108,107 @@ namespace ColonyFramework
                 }
             }
             return max > 0 ? cur / max : 0;
+        }
+
+        // Cargo split for the mining deliver-vs-dump decision (one pass; skips fuel blocks):
+        //  totalFrac      = total cargo volume / capacity (is it full?)
+        //  junkOfOreFrac  = Stone/Ice amount / all-ore amount (how much of the ore is worthless junk?)
+        // Junk excludes the mission's target ore (so an ice/stone mission keeps its target).
+        public static void OreFill(IMyCubeGrid grid, string targetOre, out double totalFrac, out double junkOfOreFrac)
+        {
+            double cur = 0, max = 0, oreAmt = 0, junkAmt = 0;
+            var blocks = new List<IMySlimBlock>();
+            grid.GetBlocks(blocks);
+            var items = new List<MyInventoryItem>();
+            for (int b = 0; b < blocks.Count; b++)
+            {
+                var fat = blocks[b].FatBlock as IMyCubeBlock;
+                if (fat == null || !fat.HasInventory || !IsCargoBlock(fat)) continue;
+                for (int i = 0; i < fat.InventoryCount; i++)
+                {
+                    var inv = fat.GetInventory(i);
+                    if (inv == null) continue;
+                    cur += (double)inv.CurrentVolume;
+                    max += (double)inv.MaxVolume;
+                    items.Clear();
+                    inv.GetItems(items);
+                    for (int it = 0; it < items.Count; it++)
+                    {
+                        var item = items[it];
+                        if (item.Type.TypeId != "MyObjectBuilder_Ore") continue;
+                        double amt = (double)item.Amount;
+                        oreAmt += amt;
+                        string sub = item.Type.SubtypeId;
+                        if ((sub == "Stone" || sub == "Ice") && sub != targetOre) junkAmt += amt;
+                    }
+                }
+            }
+            totalFrac = max > 0 ? cur / max : 0;
+            junkOfOreFrac = oreAmt > 0 ? junkAmt / oreAmt : 0;
+        }
+
+        // Move all Stone/Ice (except the target ore) from the drone's cargo into its connector so a
+        // ThrowOut-enabled connector ejects it. Returns the junk amount still sitting in the connector
+        // (i.e. not yet ejected); 0 means the dump is complete. Caller toggles droneCon.ThrowOut.
+        public static double MoveJunkToConnector(IMyCubeGrid grid, IMyShipConnector droneCon, string targetOre)
+        {
+            if (droneCon == null) return 0;
+            var conInv = droneCon.GetInventory();
+            if (conInv == null) return 0;
+
+            var blocks = new List<IMySlimBlock>();
+            grid.GetBlocks(blocks);
+            var items = new List<MyInventoryItem>();
+            for (int b = 0; b < blocks.Count; b++)
+            {
+                var fat = blocks[b].FatBlock as IMyCubeBlock;
+                if (fat == null || !fat.HasInventory || !IsCargoBlock(fat)) continue;
+                for (int i = 0; i < fat.InventoryCount; i++)
+                {
+                    var inv = fat.GetInventory(i);
+                    if (inv == null || inv == conInv) continue;
+                    bool moved = true; int guard = 0;
+                    while (moved && guard++ < 200)
+                    {
+                        moved = false;
+                        items.Clear();
+                        inv.GetItems(items);
+                        for (int it = 0; it < items.Count; it++)
+                        {
+                            var item = items[it];
+                            if (item.Type.TypeId != "MyObjectBuilder_Ore") continue;
+                            string sub = item.Type.SubtypeId;
+                            if ((sub == "Stone" || sub == "Ice") && sub != targetOre)
+                            {
+                                if (inv.TransferItemTo(conInv, it)) { moved = true; break; } // index shifts; re-scan
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Junk still on the whole grid (connector + any cargo that couldn't fit yet) — 0 = dump done.
+            double junkLeft = 0;
+            for (int b = 0; b < blocks.Count; b++)
+            {
+                var fat = blocks[b].FatBlock as IMyCubeBlock;
+                if (fat == null || !fat.HasInventory || !IsCargoBlock(fat)) continue;
+                for (int i = 0; i < fat.InventoryCount; i++)
+                {
+                    var inv = fat.GetInventory(i);
+                    if (inv == null) continue;
+                    items.Clear();
+                    inv.GetItems(items);
+                    for (int it = 0; it < items.Count; it++)
+                    {
+                        var item = items[it];
+                        if (item.Type.TypeId != "MyObjectBuilder_Ore") continue;
+                        string sub = item.Type.SubtypeId;
+                        if ((sub == "Stone" || sub == "Ice") && sub != targetOre) junkLeft += (double)item.Amount;
+                    }
+                }
+            }
+            return junkLeft;
         }
 
         public static bool HasInfinitePower(IMyCubeGrid grid)

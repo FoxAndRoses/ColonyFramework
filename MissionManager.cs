@@ -42,6 +42,26 @@ namespace ColonyFramework
             return created;
         }
 
+        // Demand-driven: create one Mine mission for a specific deposit (e.g. production needs its ore),
+        // unless that deposit already has an active mission. Returns true if a mission was created.
+        public bool CreateMineMission(long depositId, long tick)
+        {
+            if (HasActiveMissionFor(depositId)) return false;
+            var d = _deposits.GetById(depositId);
+            if (d == null || d.Status != DepositStatus.Unclaimed) return false;
+
+            _state.Missions.Add(new Mission
+            {
+                Id = _state.NextMissionId++,
+                Type = MissionType.Mine,
+                TargetDepositId = depositId,
+                AssignedAssetId = 0,
+                Status = MissionStatus.PendingAssignment,
+                CreatedTick = tick
+            });
+            return true;
+        }
+
         public Mission GetById(long id)
         {
             for (int i = 0; i < _state.Missions.Count; i++)

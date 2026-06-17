@@ -12,7 +12,7 @@ namespace ColonyFramework
         private readonly ColonyRegistry _registry;
         private readonly OreScanner _scanner = new OreScanner();
         private readonly ResourceTracker _tracker = new ResourceTracker();
-        private readonly ProjectorReader _projectors = new ProjectorReader();
+        private readonly ProductionService _production = new ProductionService();
         private readonly DispatchService _dispatch = new DispatchService();
 
         // Single source of truth for the help listing (keep in sync as commands are added).
@@ -233,34 +233,28 @@ namespace ColonyFramework
             // Refresh stock first so the comparison is current (same as /colony resources).
             _tracker.Scan(core.CubeGrid, colony.OwnerKey, colony.Resources, MyAPIGateway.Session.GameDateTime.Ticks);
 
-            int nProj, nBlocks;
-            var required = _projectors.RequiredComponents(core.CubeGrid, out nProj, out nBlocks);
-            if (nProj == 0) { MyAPIGateway.Utilities.ShowMessage("Colony", "no active projector found"); return; }
+            // Same rollup the autonomous ProductionService uses, so the report matches what it will do.
+            var st = _production.Rollup(colony);
+            if (!st.Projecting) { MyAPIGateway.Utilities.ShowMessage("Colony", "no active projector found"); return; }
 
-            var have = colony.Resources.Components;
-            var missing = new List<string>();
-            double requiredTotal = 0, missingTotal = 0;
-            foreach (var kv in required)
+            MyAPIGateway.Utilities.ShowMessage("Colony", string.Format("blueprint: {0} projector(s), {1} blocks", st.Projectors, st.Blocks));
+            if (st.MissingComponents.Count == 0)
+                MyAPIGateway.Utilities.ShowMessage("Colony", "components fully stocked — blueprint ready to weld");
+            else
             {
-                requiredTotal += kv.Value;
-                double stock;
-                have.TryGetValue(kv.Key, out stock);
-                double shortBy = kv.Value - stock;
-                if (shortBy > 0)
-                {
-                    missing.Add(string.Format("{0:N0} {1}", shortBy, kv.Key));
-                    missingTotal += shortBy;
-                }
+                MyAPIGateway.Utilities.ShowMessage("Colony", "need components: " + ProductionService.Summarize(st.MissingComponents, ""));
+                if (st.MissingOre.Count > 0)
+                    MyAPIGateway.Utilities.ShowMessage("Colony", "must mine: " + ProductionService.Summarize(st.MissingOre, " ore"));
+                else
+                    MyAPIGateway.Utilities.ShowMessage("Colony", "have the raw materials — will queue assemblers shortly");
             }
 
-            string summary = missing.Count == 0
-                ? string.Format("blueprint: {0} projector(s), {1} blocks — fully stocked", nProj, nBlocks)
-                : string.Format("blueprint: {0} projector(s), {1} blocks; missing: {2}", nProj, nBlocks, string.Join(", ", missing));
-            MyAPIGateway.Utilities.ShowMessage("Colony", summary);
-
             VRage.Utils.MyLog.Default.WriteLineAndConsole(string.Format(
-                "[ColonyFramework] /colony build: {0} projector(s), {1} blocks; required {2} comp types ({3:N0}), missing {4} types ({5:N0})",
-                nProj, nBlocks, required.Count, requiredTotal, missing.Count, missingTotal));
+                "[ColonyFramework] /colony build: {0} proj, {1} blocks; missing comp {2} | ingot {3} | ore {4}",
+                st.Projectors, st.Blocks,
+                ProductionService.Summarize(st.MissingComponents, ""),
+                ProductionService.Summarize(st.MissingIngots, ""),
+                ProductionService.Summarize(st.MissingOre, "")));
         }
     }
 }

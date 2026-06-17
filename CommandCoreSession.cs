@@ -21,6 +21,7 @@ namespace ColonyFramework
         private const int AssignIntervalTicks = 180;
         private const int CoreIntervalTicks = 60;
         private const int ResourceIntervalTicks = 1800; // ~30s
+        private const int ProductionIntervalTicks = 300; // ~5s
         private const int ExecIntervalTicks = 10; // ~6 Hz
 
         private WorldState _world;
@@ -32,6 +33,7 @@ namespace ColonyFramework
         private readonly ResourceTracker _resourceTracker = new ResourceTracker();
         private readonly DroneExecutor _executor = new DroneExecutor();
         private readonly DispatchService _dispatch = new DispatchService();
+        private readonly ProductionService _production = new ProductionService();
 
         private int _tick;
         private long _scanTick;
@@ -115,6 +117,17 @@ namespace ColonyFramework
                     if (!colony.Active) continue;
                     _assignment.ValidateAndAssign(colony);
                     _dispatch.AutoDispatchAssigned(colony); // autonomous: launch assigned missions (incl. a just-recharged drone's next one)
+                }
+            }
+
+            if (_tick % ProductionIntervalTicks == 0)
+            {
+                foreach (var colony in _registry.Colonies)
+                {
+                    if (!colony.Active) continue;
+                    // Isolate the production/definition API (new, higher-surface) so a hiccup can't kill the tick.
+                    try { _production.Tick(colony); }
+                    catch (Exception e) { MyLog.Default.WriteLineAndConsole("[ColonyFramework] production error: " + e.Message); }
                 }
             }
 

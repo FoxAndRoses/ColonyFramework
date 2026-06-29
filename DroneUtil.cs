@@ -110,13 +110,14 @@ namespace ColonyFramework
             return max > 0 ? cur / max : 0;
         }
 
-        // Cargo split for the mining deliver-vs-dump decision (one pass; skips fuel blocks):
+        // Cargo split for the mining deliver-vs-dump and yield-depth decisions (one pass; skips fuel):
         //  totalFrac      = total cargo volume / capacity (is it full?)
         //  junkOfOreFrac  = Stone/Ice amount / all-ore amount (how much of the ore is worthless junk?)
+        //  targetOreAmt   = amount of the mission's target ore currently held (drives dynamic bore depth)
         // Junk excludes the mission's target ore (so an ice/stone mission keeps its target).
-        public static void OreFill(IMyCubeGrid grid, string targetOre, out double totalFrac, out double junkOfOreFrac)
+        public static void OreFill(IMyCubeGrid grid, string targetOre, out double totalFrac, out double junkOfOreFrac, out double targetOreAmt)
         {
-            double cur = 0, max = 0, oreAmt = 0, junkAmt = 0;
+            double cur = 0, max = 0, oreAmt = 0, junkAmt = 0, tgtAmt = 0;
             var blocks = new List<IMySlimBlock>();
             grid.GetBlocks(blocks);
             var items = new List<MyInventoryItem>();
@@ -140,11 +141,13 @@ namespace ColonyFramework
                         oreAmt += amt;
                         string sub = item.Type.SubtypeId;
                         if ((sub == "Stone" || sub == "Ice") && sub != targetOre) junkAmt += amt;
+                        if (sub == targetOre) tgtAmt += amt;
                     }
                 }
             }
             totalFrac = max > 0 ? cur / max : 0;
             junkOfOreFrac = oreAmt > 0 ? junkAmt / oreAmt : 0;
+            targetOreAmt = tgtAmt;
         }
 
         // Move all Stone/Ice (except the target ore) from the drone's cargo into its connector so a

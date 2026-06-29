@@ -7,10 +7,45 @@ namespace ColonyFramework
 {
     public class AssignmentService
     {
+        private readonly System.Collections.Generic.Dictionary<long, System.DateTime> _noDepositChat
+            = new System.Collections.Generic.Dictionary<long, System.DateTime>();
+        private const double NoDepositChatSecs = 120.0;
+
         public void ValidateAndAssign(Colony colony)
         {
             ValidateAssets(colony);
             AssignPending(colony);
+            ReportIfOutOfDeposits(colony);
+        }
+
+        // If a drone wants work but the colony has no ore left to mine (no unclaimed deposits and no
+        // active missions), tell the player — throttled so it doesn't spam.
+        private void ReportIfOutOfDeposits(Colony colony)
+        {
+            bool idleWanting = false;
+            var assets = colony.Assets.Assets;
+            for (int i = 0; i < assets.Count; i++)
+                if (assets[i].Status == AssetStatus.Idle && assets[i].AutoDispatchEnabled) { idleWanting = true; break; }
+            if (!idleWanting) return;
+
+            var deps = colony.Deposits.Deposits;
+            for (int i = 0; i < deps.Count; i++)
+                if (deps[i].Status == DepositStatus.Unclaimed) return; // ore still available to assign
+
+            var ms = colony.Missions.Missions;
+            for (int i = 0; i < ms.Count; i++)
+                if (ms[i].Status == MissionStatus.PendingAssignment ||
+                    ms[i].Status == MissionStatus.Assigned ||
+                    ms[i].Status == MissionStatus.InProgress) return; // work still in flight (may release more)
+
+            System.DateTime last;
+            if (_noDepositChat.TryGetValue(colony.OwnerKey, out last) &&
+                (System.DateTime.UtcNow - last).TotalSeconds < NoDepositChatSecs) return;
+            _noDepositChat[colony.OwnerKey] = System.DateTime.UtcNow;
+
+            if (!MyAPIGateway.Utilities.IsDedicated)
+                MyAPIGateway.Utilities.ShowMessage("Colony", "no known ore deposits remain — scan for more (/colony scan)");
+            MyLog.Default.WriteLineAndConsole("[ColonyFramework] colony " + colony.OwnerKey + ": out of ore deposits, idle drone waiting");
         }
 
         private const int OfflineTicksBeforePurge = 2; // 2 validation cycles ≈ 6s (ValidateAssets runs every 180 ticks / 3s)

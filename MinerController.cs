@@ -152,6 +152,9 @@ namespace ColonyFramework
         private const double CargoThreshold     = 0.80;
         private const double LowPowerThreshold  = 0.20;
         private const double JunkDumpFrac       = 0.05; // dump when >=5% of the cargo's ore is Stone/Ice — eject it (nearly) fully rather than haul it; keep all real ore
+        private const double YieldEps           = 1.0;  // min target-ore amount gain that counts as "still hitting ore"
+        private const double YieldDepthWindow   = 2.0;  // m drilled past the known ore depth with no ore gain = exhausted, stop the bore
+        private const double MaxBoreDepth       = 60.0; // hard per-bore depth cap (safety; replaces the old fixed-depth stop)
         private const double DumpHoldSecs       = 8.0;  // max time to hold out of the shaft ejecting before re-entering
         private const double BoreTimeoutSeconds = 600;  // ceiling = 10-min runtime floor
         private const double AlignmentMinDot    = 0.7;
@@ -214,6 +217,9 @@ namespace ColonyFramework
         private bool _reentering;      // returning down the same shaft after a dump (resume drilling, keep _boreContact)
         private double _ejectResumePen;// depth we left the bore at, to descend back to
         private DateTime _ejectHoldStart; // when the dump hold began
+        private double _yieldRefPen;   // deepest pen at which target ore was still being collected this bore
+        private double _yieldRefAmt;   // target-ore amount in cargo at that point (yield-stall detection)
+        private bool _depositExhausted;// true once the whole + is mined out → deplete (else release for another pass)
 
         public void Advance(Colony colony, Mission m, DepositRecord deposit, IMyCubeGrid grid)
         {
@@ -525,6 +531,7 @@ namespace ColonyFramework
             _subStart = DateTime.UtcNow;
             _ejecting = false;
             _reentering = false;
+            _depositExhausted = true; // default: deplete on mission end; only cargo-full/low-power RELEASE to finish later
             m.Phase = PhaseMining;
             MyLog.Default.WriteLineAndConsole(string.Format(
                 "[ColonyFramework] Mission {0}: +-pattern bore at deposit {1}, {2} drills",
@@ -545,6 +552,7 @@ namespace ColonyFramework
                     if (!MyAPIGateway.Utilities.IsDedicated)
                         MyAPIGateway.Utilities.ShowMessage("Colony", string.Format(
                             "Drone low power ({0:N0}%), aborting to base to recharge", charge * 100));
+                    _depositExhausted = false; // recharge and come back to finish this deposit
                     BeginRetreat(m, grid, string.Format("low power ({0:N0}%)", charge * 100));
                     return;
                 }
@@ -627,6 +635,7 @@ namespace ColonyFramework
                             DroneUtil.SetDrills(grid, true);
                             _boreSub = BoreDrilling;
                             _subStart = DateTime.UtcNow;
+                            _yieldRefAmt = 0; _yieldRefPen = pen; // resume yield tracking from the re-entry depth
                             MyLog.Default.WriteLineAndConsole(string.Format(
                                 "[ColonyFramework] Mission {0}: eject — re-entered shaft, resuming bore {1} at {2:F1}m",
                                 m.Id, BoreName[_boreIndex], pen));
@@ -644,16 +653,17 @@ namespace ColonyFramework
                         DroneUtil.SetDrills(grid, true);
                         _boreSub = BoreDrilling;
                         _subStart = DateTime.UtcNow;
+                        _yieldRefAmt = 0; _yieldRefPen = 0; // first drilling tick re-bases these to current cargo at pen~0
                         MyLog.Default.WriteLineAndConsole(string.Format(
-                            "[ColonyFramework] Mission {0}: bore {1} ({2}/5) start, target depth {3:F1}m",
+                            "[ColonyFramework] Mission {0}: bore {1} ({2}/5) start, depth hint {3:F1}m (drills until ore runs out)",
                             m.Id, BoreName[_boreIndex], _boreIndex + 1, _targetDepth));
                     }
                 }
             }
             else if (_boreSub == BoreDrilling)
             {
-                double totalFrac, junkFrac;
-                DroneUtil.OreFill(grid, deposit.OreType, out totalFrac, out junkFrac);
+                double totalFrac, junkFrac, targetOreAmt;
+                DroneUtil.OreFill(grid, deposit.OreType, out totalFrac, out junkFrac, out targetOreAmt);
                 if (totalFrac >= CargoThreshold)
                 {
                     DroneUtil.SetDrills(grid, false);
@@ -671,17 +681,29 @@ namespace ColonyFramework
                     }
                     else
                     {
+                        _depositExhausted = false; // cargo full but ore may remain — release the deposit, come back to finish
                         BeginRetreat(m, grid, string.Format("cargo full (junk {0:P0} < {1:P0} threshold)", junkFrac, JunkDumpFrac));
                     }
                     return;
                 }
                 double pen = Vector3D.Dot(pos - _boreContact, downDir);
-                if (pen >= _targetDepth)
+                if (targetOreAmt > _yieldRefAmt + YieldEps)   // still pulling target ore — remember this depth
+                {
+                    _yieldRefAmt = targetOreAmt;
+                    _yieldRefPen = pen;
+                }
+                // Dynamic depth: drill at least to the discovered ore depth, then keep going WHILE ore is
+                // still coming, and stop once it dries up (or at the hard cap). No fixed stop.
+                bool oreExhausted = pen >= _targetDepth && (pen - _yieldRefPen) >= YieldDepthWindow;
+                if (oreExhausted || pen >= MaxBoreDepth)
                 {
                     DroneUtil.SetDrills(grid, false);
                     _boreSub = BoreAscend;
                     _subStart = DateTime.UtcNow;
                     ResetAscend();
+                    MyLog.Default.WriteLineAndConsole(string.Format(
+                        "[ColonyFramework] Mission {0}: bore {1} done at {2:F1}m ({3})",
+                        m.Id, BoreName[_boreIndex], pen, pen >= MaxBoreDepth ? "max depth" : "ore exhausted"));
                 }
                 else
                 {
@@ -705,6 +727,7 @@ namespace ColonyFramework
                         _boreIndex++;
                         if (_boreIndex >= DU.Length)
                         {
+                            _depositExhausted = true; // whole + drilled until ore ran out → this spot is mined out
                             BeginRetreat(m, grid, "+ pattern complete");
                             return;
                         }
@@ -1008,12 +1031,15 @@ namespace ColonyFramework
             var rc = DroneUtil.FindRc(grid);
             if (rc != null) { rc.SetAutoPilotEnabled(false); rc.DampenersOverride = true; } // stop autopilot, restore dampeners
             double cargo = DroneUtil.CargoFill(grid);
-            colony.Missions.Complete(m.Id);
+            // Deplete the deposit only if its + was fully mined out; otherwise return it to the pool so a
+            // later mission finishes it (multi-load mining via the existing assign/dispatch loop).
+            if (_depositExhausted) colony.Missions.Complete(m.Id);
+            else colony.Missions.CompleteAndRelease(m.Id);
             var asset = colony.Assets.GetByEntityId(m.AssignedAssetId);
             if (asset != null) { asset.Status = AssetStatus.Idle; asset.AssignedMissionId = 0; }
             MyLog.Default.WriteLineAndConsole(string.Format(
-                "[ColonyFramework] Mission {0} complete: deposit {1} mined (drone cargo now {2:N0}%), asset idle",
-                m.Id, m.TargetDepositId, cargo * 100));
+                "[ColonyFramework] Mission {0} complete: deposit {1} {2} (drone cargo now {3:N0}%), asset idle",
+                m.Id, m.TargetDepositId, _depositExhausted ? "depleted" : "released (ore remains)", cargo * 100));
         }
 
         // ── Dock: go to staging point, lower to connector height, get in-line, reverse-crawl, lock.

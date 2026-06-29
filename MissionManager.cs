@@ -96,6 +96,16 @@ namespace ColonyFramework
             _deposits.MarkDepleted(m.TargetDepositId);
         }
 
+        // This load delivered, but the deposit still has ore: complete the mission and RETURN the deposit
+        // to the pool (Claimed → Unclaimed) so it gets re-assigned and finished across more loads.
+        public void CompleteAndRelease(long missionId)
+        {
+            var m = GetById(missionId);
+            if (m == null) return;
+            m.Status = MissionStatus.Completed;
+            _deposits.Release(m.TargetDepositId);
+        }
+
         // Mining aborted: deposit returned to the pool.
         public void Fail(long missionId)
         {

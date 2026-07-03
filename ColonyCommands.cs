@@ -25,6 +25,7 @@ namespace ColonyFramework
             "/colony assets — drone roster",
             "/colony resources — ore / ingot / component stock",
             "/colony build — projector blueprint vs stock (missing parts)",
+            "/colony status — live mission/drone status + survey coverage",
             "/colony dispatch — enable autonomous mining",
             "/colony abort — stop all missions",
             "/colony recall — bring drones home",
@@ -84,6 +85,12 @@ namespace ColonyFramework
             if (text == "/colony build")
             {
                 HandleBuild(colony);
+                return;
+            }
+
+            if (text == "/colony status")
+            {
+                HandleStatus(colony);
                 return;
             }
 
@@ -226,6 +233,61 @@ namespace ColonyFramework
         {
             for (int i = 0; i < HelpLines.Length; i++)
                 MyAPIGateway.Utilities.ShowMessage("Colony", HelpLines[i]);
+        }
+
+        // Phase names per mission type (indexes match each controller's Phase constants).
+        private static readonly string[] MinePhases   = { "commission", "transit", "start bore", "mining", "retreat", "docking" };
+        private static readonly string[] WeldPhases   = { "commission", "dock/load", "transit", "welding", "return" };
+        private static readonly string[] SurveyPhases = { "commission", "transit", "scanning", "return" };
+
+        // Live snapshot for the testing rounds: every active mission (what/who/where in the lifecycle),
+        // every asset, and the survey coverage cursor — one command instead of log archaeology.
+        private void HandleStatus(Colony colony)
+        {
+            int shown = 0;
+            var ms = colony.Missions.Missions;
+            for (int i = 0; i < ms.Count; i++)
+            {
+                var m = ms[i];
+                if (m.Status != MissionStatus.Assigned && m.Status != MissionStatus.InProgress) continue;
+                shown++;
+
+                var grid = MyAPIGateway.Entities.GetEntityById(m.AssignedAssetId) as IMyCubeGrid;
+                string drone = grid != null ? grid.DisplayName : ("#" + m.AssignedAssetId);
+
+                string what;
+                string[] phases;
+                if (m.Type == MissionType.Weld) { what = "weld projector " + m.TargetEntityId; phases = WeldPhases; }
+                else if (m.Type == MissionType.Survey) { what = m.TargetOre != null ? "survey for " + m.TargetOre : "general survey"; phases = SurveyPhases; }
+                else
+                {
+                    var dep = colony.Deposits.GetById(m.TargetDepositId);
+                    what = "mine " + (dep != null ? dep.OreType + " deposit " + dep.Id : "deposit " + m.TargetDepositId);
+                    phases = MinePhases;
+                }
+                string phase = m.Status == MissionStatus.Assigned ? "awaiting launch"
+                    : (m.Phase >= 0 && m.Phase < phases.Length ? phases[m.Phase] : "phase " + m.Phase);
+
+                MyAPIGateway.Utilities.ShowMessage("Colony", string.Format(
+                    "mission {0}: '{1}' — {2} ({3})", m.Id, drone, what, phase));
+            }
+            if (shown == 0) MyAPIGateway.Utilities.ShowMessage("Colony", "no active missions");
+
+            var assets = colony.Assets.Assets;
+            for (int i = 0; i < assets.Count; i++)
+            {
+                var a = assets[i];
+                MyAPIGateway.Utilities.ShowMessage("Colony", string.Format(
+                    "asset '{0}': {1}, {2}{3}", a.Name,
+                    a.Type == AssetType.Welder ? "welder" : "miner",
+                    a.Status == AssetStatus.Idle ? "idle" : a.Status == AssetStatus.Assigned ? "on mission" : "offline",
+                    a.AutoDispatchEnabled ? "" : " (parked)"));
+            }
+
+            if (colony.State.SurveyedRadius > 0)
+                MyAPIGateway.Utilities.ShowMessage("Colony", string.Format(
+                    "survey coverage: {0:F0} m ring at {1:F0}°; deposits known: {2}",
+                    colony.State.SurveyedRadius, colony.State.SurveyedAngleDeg, colony.Deposits.Deposits.Count));
         }
 
         // Compare the projector blueprint's component bill-of-materials to current colony stock and report

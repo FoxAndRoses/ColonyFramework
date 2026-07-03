@@ -94,7 +94,7 @@ namespace ColonyFramework
         private void TickCommission(Colony colony, Mission m, IMyCubeGrid grid, VRage.Game.ModAPI.IMyCubeBlock core)
         {
             if (DroneUtil.FindOreDetector(grid) == null) { Fail(colony, m, grid, "no working ore detector"); return; }
-            DroneUtil.ReleaseGrid(grid);
+            DroneUtil.PrepareForFlight(grid);
             if (colony.State.SurveyedRadius <= 0) colony.State.SurveyedRadius = FirstRing;
             Log(m, string.Format("survey start{0} — ring {1:F0} m at {2:F0}°",
                 m.TargetOre != null ? " (hunting " + m.TargetOre + ")" : "",
@@ -305,6 +305,7 @@ namespace ColonyFramework
         private void Cleanup(IMyCubeGrid grid)
         {
             if (grid == null) return;
+            DroneUtil.SetBatteriesRecharge(grid, false); // never leave Recharge leaked into idle
             _fly.Release(grid);
             var rc = DroneUtil.FindRc(grid);
             if (rc != null) { rc.SetAutoPilotEnabled(false); rc.DampenersOverride = true; }

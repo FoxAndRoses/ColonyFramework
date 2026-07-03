@@ -459,6 +459,32 @@ namespace ColonyFramework
             }
         }
 
+        // Enable/disable all thrusters and gyros — parked drones power-nap with them off (zero drain).
+        public static void SetThrustersAndGyros(IMyCubeGrid grid, bool on)
+        {
+            var ts = MyAPIGateway.TerminalActionsHelper.GetTerminalSystemForGrid(grid);
+            if (ts == null) return;
+            var thrusters = new List<IMyThrust>();
+            ts.GetBlocksOfType(thrusters);
+            for (int i = 0; i < thrusters.Count; i++) thrusters[i].Enabled = on;
+            var gyros = new List<IMyGyro>();
+            ts.GetBlocksOfType(gyros);
+            for (int i = 0; i < gyros.Count; i++) gyros[i].Enabled = on;
+        }
+
+        // THE launch choke point — everything a drone needs to actually fly, in the safe order.
+        // A battery left in Recharge outputs NOTHING (the "squirm": an unpowered drone flopping on
+        // the pad), so batteries go back to Auto here; thrusters/gyros re-enable BEFORE the gear
+        // unlocks so it never drops dead; dampeners on so it hovers the instant it's free.
+        public static void PrepareForFlight(IMyCubeGrid grid)
+        {
+            SetBatteriesRecharge(grid, false);
+            SetThrustersAndGyros(grid, true);
+            var rc = FindRc(grid);
+            if (rc != null) rc.DampenersOverride = true;
+            ReleaseGrid(grid);
+        }
+
         // Lock all landing gear (true if at least one actually locked) — anchors the drone during the
         // commissioning load test so the full-thrust spike can't shove it off the pad.
         public static bool LockGear(IMyCubeGrid grid)

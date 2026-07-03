@@ -330,7 +330,7 @@ namespace ColonyFramework
 
         private void EngageTransit(IMyCubeGrid grid, DepositRecord deposit)
         {
-            DroneUtil.ReleaseGrid(grid);
+            DroneUtil.PrepareForFlight(grid); // batteries auto + thrusters/gyros on + unlock (leak-proof launch)
             Vector3D standoff = NavMath.ComputeStandoff(deposit.Position, grid.GetPosition());
             EngageCruise(grid, standoff, CruiseSpeedLimit, "Deposit " + deposit.Id + " standoff");
         }
@@ -454,6 +454,8 @@ namespace ColonyFramework
             if (grid == null) return;
             _bore.Release(grid);
             DroneUtil.SetDrills(grid, false);
+            DroneUtil.SetBatteriesRecharge(grid, false);  // a recovering hover NEEDS battery output
+            DroneUtil.SetThrustersAndGyros(grid, true);
             var rc = DroneUtil.FindRc(grid);
             if (rc != null) { rc.SetAutoPilotEnabled(false); rc.DampenersOverride = true; }
         }
@@ -1054,6 +1056,7 @@ namespace ColonyFramework
         private void CompleteMission(Colony colony, Mission m, IMyCubeGrid grid)
         {
             _bore.Release(grid);
+            DroneUtil.SetBatteriesRecharge(grid, false); // never leave Recharge leaked into idle
             var rc = DroneUtil.FindRc(grid);
             if (rc != null) { rc.SetAutoPilotEnabled(false); rc.DampenersOverride = true; } // stop autopilot, restore dampeners
             double cargo = DroneUtil.CargoFill(grid);
@@ -1410,6 +1413,7 @@ namespace ColonyFramework
             {
                 _bore.Release(grid);
                 DroneUtil.SetDrills(grid, false);
+                DroneUtil.SetBatteriesRecharge(grid, false); // never leave Recharge leaked into idle
                 var rc = DroneUtil.FindRc(grid);
                 if (rc != null) { rc.SetAutoPilotEnabled(false); rc.DampenersOverride = true; } // stop autopilot, restore dampeners
             }

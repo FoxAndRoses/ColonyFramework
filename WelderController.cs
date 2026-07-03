@@ -148,7 +148,7 @@ namespace ColonyFramework
                 ? DockLoading : DockApproach;
             if (_dockSub == DockApproach)
             {
-                DroneUtil.ReleaseGrid(grid); // autopilot does NOT release landing gear/connectors — unlock or it fights the pad
+                DroneUtil.PrepareForFlight(grid); // batteries auto + thrusters on + unlock — autopilot won't do any of it
                 Vector3D standoff;
                 if (TryCoreStandoff(colony, out standoff)) CruiseTo(grid, standoff, (float)DockMoveSpeed, "base standoff", null);
             }
@@ -188,8 +188,7 @@ namespace ColonyFramework
             bool haveSomething = DroneUtil.CargoFill(grid) > 0.02;
             if ((charged || stalled) && haveSomething)
             {
-                DroneUtil.SetBatteriesRecharge(grid, false);
-                DroneUtil.ReleaseGrid(grid);
+                DroneUtil.PrepareForFlight(grid);
                 Log(m, string.Format("loaded + charged ({0:N0}%), flying to build site", charge * 100));
                 BeginTransit(m, grid, projector);
             }
@@ -763,6 +762,7 @@ namespace ColonyFramework
         {
             if (grid == null) return;
             DroneUtil.SetWelders(grid, false);
+            DroneUtil.SetBatteriesRecharge(grid, false); // never leave Recharge leaked into idle
             _fly.Release(grid);
             var rc = DroneUtil.FindRc(grid);
             if (rc != null) { rc.SetAutoPilotEnabled(false); rc.DampenersOverride = true; }

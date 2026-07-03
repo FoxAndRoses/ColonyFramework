@@ -92,6 +92,8 @@ namespace ColonyFramework
         private bool _hasTarget;
         private readonly HashSet<Vector3I> _deferred = new HashSet<Vector3I>();
         private bool _deferredRetried; // one full retry pass over deferred blocks before declaring stuck
+        private readonly BlueprintStager _stager = new BlueprintStager(); // shipyard build order (frame -> internals -> closure)
+        private int _announcedStage = -1;
 
         // ── Entry point (called at ~6 Hz by DroneExecutor) ──────────────────────────────────────────
         public void Advance(Colony colony, Mission m, IMyCubeGrid grid)
@@ -305,18 +307,37 @@ namespace ColonyFramework
 
             var blocks = new List<IMySlimBlock>();
             projected.GetBlocks(blocks);
+            _stager.EnsureBuilt(blocks); // one-time classification: frame / internals / closure
 
+            // Shipyard order: lowest STAGE first (frame -> internals -> closure), bottom-up within a
+            // stage (build from the keel), nearest as the tiebreak. CanBuild still gates placement, so
+            // stage members whose neighbours don't exist yet are skipped and picked up next pass.
             IMySlimBlock best = null;
-            double bestSq = double.MaxValue;
+            int bestStage = int.MaxValue;
+            double bestAlt = double.MaxValue, bestSq = double.MaxValue;
             Vector3D pos = grid.GetPosition();
+            Vector3D up = _nav.Valid ? _nav.GravityUp : Vector3D.Up;
             for (int i = 0; i < blocks.Count; i++)
             {
                 var b = blocks[i];
                 if (_deferred.Contains(b.Position)) continue;
                 if (projector.CanBuild(b, true) != BuildCheckResult.OK) continue;
                 Vector3D w = projected.GridIntegerToWorld(b.Position);
+                int stage = _stager.StageOf(b);
+                double alt = Vector3D.Dot(w, up);
                 double sq = Vector3D.DistanceSquared(w, pos);
-                if (sq < bestSq) { bestSq = sq; best = b; }
+                if (stage < bestStage
+                    || (stage == bestStage && alt < bestAlt - 1.0)
+                    || (stage == bestStage && System.Math.Abs(alt - bestAlt) <= 1.0 && sq < bestSq))
+                { bestStage = stage; bestAlt = alt; bestSq = sq; best = b; }
+            }
+
+            if (best != null && bestStage != _announcedStage)
+            {
+                _announcedStage = bestStage;
+                if (!MyAPIGateway.Utilities.IsDedicated)
+                    MyAPIGateway.Utilities.ShowMessage("Colony", "Construction stage: " + BlueprintStager.StageName(bestStage));
+                Log(m, "construction stage: " + BlueprintStager.StageName(bestStage));
             }
 
             if (best == null)

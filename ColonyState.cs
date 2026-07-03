@@ -18,5 +18,7 @@ namespace ColonyFramework
         [ProtoMember(10)] public string Name;
         [ProtoMember(11)] public long FounderId;
         [ProtoMember(12)] public long CreatedGameTicks;
+        [ProtoMember(13)] public double SurveyedRadius;   // ore-survey ring cursor: how far out we've scanned
+        [ProtoMember(14)] public double SurveyedAngleDeg; // ...and how far around the current ring
     }
 }

@@ -5,7 +5,8 @@ namespace ColonyFramework
     public enum MissionType
     {
         Mine = 0,
-        Weld = 1
+        Weld = 1,
+        Survey = 2
     }
 
     // Lifecycle: PendingAssignment -> Assigned -> InProgress -> (Completed | Failed)
@@ -29,5 +30,6 @@ namespace ColonyFramework
         [ProtoMember(6)] public long CreatedTick;
         [ProtoMember(7)] public int Phase; // 0=Commission, 1=Transit, 2=StartBore, 3=Mining, 4=Retreat, 5=Dock
         [ProtoMember(8)] public long TargetEntityId; // Weld missions: the projector block's entity id (Mine missions: 0)
+        [ProtoMember(9)] public string TargetOre;    // Survey missions: the ore we're hunting (null = general survey)
     }
 }

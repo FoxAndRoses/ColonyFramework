@@ -42,8 +42,11 @@ namespace ColonyFramework
         private DateTime _lastPlanetFind;
 
         // True if the corridor toward 'target' is obstructed; 'via' is the suggested detour waypoint
-        // and 'obstacle' names what's in the way (for the caller's log line).
-        public bool TryGetDetour(NavState nav, IMyCubeGrid self, Vector3D target, out Vector3D via, out string obstacle)
+        // and 'obstacle' names what's in the way (for the caller's log line). terrainClearance overrides
+        // the default look-ahead floor (survey legs fly ~50 m AGL and pass a lower floor so routine
+        // low flight isn't read as terrain danger).
+        public bool TryGetDetour(NavState nav, IMyCubeGrid self, Vector3D target, out Vector3D via, out string obstacle,
+                                 double terrainClearance = TerrainClearance)
         {
             via = default(Vector3D);
             obstacle = null;
@@ -77,10 +80,10 @@ namespace ColonyFramework
                         Vector3D sample = pos + dirH * (s == 0 ? look1 : look2);
                         Vector3D surface = _planet.GetClosestSurfacePointGlobal(ref sample);
                         double clearance = Vector3D.Dot(sample - surface, up);
-                        if (clearance < TerrainClearance)
+                        if (clearance < terrainClearance)
                         {
                             // Terrain rises into the corridor — detour is the sample point lifted clear.
-                            via = sample + up * (TerrainClearance * 2.0 - clearance);
+                            via = sample + up * (terrainClearance * 2.0 - clearance);
                             obstacle = "terrain ahead";
                             SenseLog(self, obstacle, s == 0 ? look1 : look2);
                             return true;

@@ -35,7 +35,8 @@ namespace ColonyFramework
     {
         private readonly ProjectorReader _projectors = new ProjectorReader();
 
-        private class ColonyProd { public DateTime ReadySince; public DateTime LastChat; }
+        private class ColonyProd { public DateTime ReadySince; public DateTime LastChat; public DateTime LastSurvey; }
+        private const double SurveyCooldownSecs = 600.0; // min gap between demand-driven survey dispatches
         private readonly Dictionary<long, ColonyProd> _state = new Dictionary<long, ColonyProd>();
 
         private readonly MyObjectBuilderType _ingotType;
@@ -103,10 +104,23 @@ namespace ColonyFramework
                 long tick = MyAPIGateway.Session.GameDateTime.Ticks;
                 var basePos = core.GetPosition();
                 int created = 0;
+                string unknownOre = null; // an ore we need but have NO deposit of anywhere in the DB
                 foreach (var kv in status.MissingOre)
                 {
                     var dep = colony.Deposits.FindNearestUnclaimed(basePos, kv.Key);
                     if (dep != null && colony.Missions.CreateMineMission(dep.Id, tick)) created++;
+                    else if (dep == null && unknownOre == null && !HasAnyDeposit(colony, kv.Key)) unknownOre = kv.Key;
+                }
+
+                // A needed ore isn't in the deposit DB AT ALL — send a scout to look for it (cooldown-gated).
+                if (unknownOre != null && (DateTime.UtcNow - st.LastSurvey).TotalSeconds > SurveyCooldownSecs
+                    && colony.Missions.EnsureSurveyMission(unknownOre, tick))
+                {
+                    st.LastSurvey = DateTime.UtcNow;
+                    if (!MyAPIGateway.Utilities.IsDedicated)
+                        MyAPIGateway.Utilities.ShowMessage("Colony", "no known " + unknownOre + " deposits — dispatching a survey drone");
+                    MyLog.Default.WriteLineAndConsole(string.Format(
+                        "[ColonyFramework] production: no {0} in deposit DB — survey mission created", unknownOre));
                 }
 
                 // This branch runs every tick — throttle the chat AND log together so it doesn't flood.
@@ -285,6 +299,16 @@ namespace ColonyFramework
                 result.AddRange(tmp);
             }
             return result;
+        }
+
+        // Any deposit of this ore in the DB at all (claimed, unclaimed, or being mined)? Depleted ones
+        // don't count — a fully-mined ore type is as unknown as a never-seen one.
+        private static bool HasAnyDeposit(Colony colony, string oreType)
+        {
+            var deps = colony.Deposits.Deposits;
+            for (int i = 0; i < deps.Count; i++)
+                if (deps[i].OreType == oreType && deps[i].Status != DepositStatus.Depleted) return true;
+            return false;
         }
 
         private ColonyProd GetState(long ownerKey)

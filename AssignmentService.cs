@@ -43,9 +43,15 @@ namespace ColonyFramework
                 (System.DateTime.UtcNow - last).TotalSeconds < NoDepositChatSecs) return;
             _noDepositChat[colony.OwnerKey] = System.DateTime.UtcNow;
 
+            // First-build / out-of-ore: send a scout instead of only asking the player.
+            long tick = MyAPIGateway.Session.GameDateTime.Ticks;
+            bool created = colony.Missions.EnsureSurveyMission(null, tick);
             if (!MyAPIGateway.Utilities.IsDedicated)
-                MyAPIGateway.Utilities.ShowMessage("Colony", "no known ore deposits remain — scan for more (/colony scan)");
-            MyLog.Default.WriteLineAndConsole("[ColonyFramework] colony " + colony.OwnerKey + ": out of ore deposits, idle drone waiting");
+                MyAPIGateway.Utilities.ShowMessage("Colony", created
+                    ? "no known ore deposits — dispatching a survey drone"
+                    : "no known ore deposits remain — scan for more (/colony scan)");
+            MyLog.Default.WriteLineAndConsole("[ColonyFramework] colony " + colony.OwnerKey +
+                (created ? ": out of deposits — survey mission created" : ": out of deposits, survey already active"));
         }
 
         private const int OfflineTicksBeforePurge = 2; // 2 validation cycles ≈ 6s (ValidateAssets runs every 180 ticks / 3s)
@@ -99,15 +105,23 @@ namespace ColonyFramework
                 var m = ms[i];
                 if (m.Status != MissionStatus.PendingAssignment) continue;
 
-                // Mission target position: deposit for Mine, projector block for Weld.
+                // Mission target position: deposit for Mine, projector for Weld, the core for Survey.
+                // Survey is a CAPABILITY (any idle drone with a working ore detector), not an asset type.
                 Vector3D dpos;
-                AssetType wantType;
+                AssetType? wantType;
                 if (m.Type == MissionType.Weld)
                 {
                     var proj = MyAPIGateway.Entities.GetEntityById(m.TargetEntityId);
                     if (proj == null) continue;
                     dpos = proj.GetPosition();
                     wantType = AssetType.Welder;
+                }
+                else if (m.Type == MissionType.Survey)
+                {
+                    var core = MyAPIGateway.Entities.GetEntityById(colony.State.CoreEntityId);
+                    if (core == null) continue;
+                    dpos = core.GetPosition();
+                    wantType = null;
                 }
                 else
                 {
@@ -123,11 +137,17 @@ namespace ColonyFramework
                 for (int j = 0; j < assets.Count; j++)
                 {
                     var a = assets[j];
-                    if (a.Status != AssetStatus.Idle || a.Type != wantType) continue;
+                    if (a.Status != AssetStatus.Idle) continue;
+                    if (wantType.HasValue && a.Type != wantType.Value) continue;
+                    if (m.Type == MissionType.Survey)
+                    {
+                        var g = MyAPIGateway.Entities.GetEntityById(a.EntityId) as VRage.Game.ModAPI.IMyCubeGrid;
+                        if (g == null || DroneUtil.FindOreDetector(g) == null) continue; // needs a working detector
+                    }
                     double sq = Vector3D.DistanceSquared(a.LastPosition, dpos);
                     if (sq < bestSq) { bestSq = sq; best = a; }
                 }
-                if (best == null) continue; // no idle asset of this TYPE — other mission types may still match
+                if (best == null) continue; // no capable idle asset — other mission types may still match
 
                 if (colony.Missions.Assign(m.Id, best.EntityId))
                 {

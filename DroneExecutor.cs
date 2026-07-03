@@ -13,6 +13,7 @@ namespace ColonyFramework
 
         private readonly Dictionary<long, MinerController> _controllers = new Dictionary<long, MinerController>();
         private readonly Dictionary<long, WelderController> _welders = new Dictionary<long, WelderController>();
+        private readonly Dictionary<long, SurveyController> _surveys = new Dictionary<long, SurveyController>();
         private readonly BoreController _bore = new BoreController(); // for ReleaseControls only
         private readonly List<long> _stale = new List<long>();
 
@@ -21,6 +22,7 @@ namespace ColonyFramework
             var ms = colony.Missions.Missions;
             var active = new HashSet<long>();
             var activeWeld = new HashSet<long>();
+            var activeSurvey = new HashSet<long>();
 
             for (int i = 0; i < ms.Count; i++)
             {
@@ -42,6 +44,11 @@ namespace ColonyFramework
                     activeWeld.Add(m.Id);
                     GetWelder(m.Id).Advance(colony, m, grid);
                 }
+                else if (m.Type == MissionType.Survey)
+                {
+                    activeSurvey.Add(m.Id);
+                    GetSurvey(m.Id).Advance(colony, m, grid);
+                }
             }
 
             // Drop controllers whose mission is no longer active in-progress.
@@ -54,6 +61,11 @@ namespace ColonyFramework
             foreach (var key in _welders.Keys)
                 if (!activeWeld.Contains(key)) _stale.Add(key);
             for (int i = 0; i < _stale.Count; i++) _welders.Remove(_stale[i]);
+
+            _stale.Clear();
+            foreach (var key in _surveys.Keys)
+                if (!activeSurvey.Contains(key)) _stale.Add(key);
+            for (int i = 0; i < _stale.Count; i++) _surveys.Remove(_stale[i]);
         }
 
         public void AbortAll(Colony colony)
@@ -68,6 +80,7 @@ namespace ColonyFramework
                 if (asset != null) asset.AutoDispatchEnabled = false; // park: don't auto-relaunch after an abort
                 if (m.Type == MissionType.Mine) { GetController(m.Id).Abort(colony, m, grid); _controllers.Remove(m.Id); }
                 else if (m.Type == MissionType.Weld) { GetWelder(m.Id).Abort(colony, m, grid); _welders.Remove(m.Id); }
+                else if (m.Type == MissionType.Survey) { GetSurvey(m.Id).Abort(colony, m, grid); _surveys.Remove(m.Id); }
             }
         }
 
@@ -106,6 +119,13 @@ namespace ColonyFramework
         {
             WelderController c;
             if (!_welders.TryGetValue(missionId, out c)) { c = new WelderController(); _welders[missionId] = c; }
+            return c;
+        }
+
+        private SurveyController GetSurvey(long missionId)
+        {
+            SurveyController c;
+            if (!_surveys.TryGetValue(missionId, out c)) { c = new SurveyController(); _surveys[missionId] = c; }
             return c;
         }
     }

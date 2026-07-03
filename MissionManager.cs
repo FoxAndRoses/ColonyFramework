@@ -68,6 +68,31 @@ namespace ColonyFramework
             return true;
         }
 
+        // One Survey mission at a time per colony: a scout flies the next ring segment scanning for ore
+        // (oreType = the specific ore production needs, or null for a general first-build survey).
+        public bool EnsureSurveyMission(string oreType, long tick)
+        {
+            for (int i = 0; i < _state.Missions.Count; i++)
+            {
+                var m = _state.Missions[i];
+                if (m.Type == MissionType.Survey &&
+                    (m.Status == MissionStatus.PendingAssignment ||
+                     m.Status == MissionStatus.Assigned ||
+                     m.Status == MissionStatus.InProgress))
+                    return false;
+            }
+            _state.Missions.Add(new Mission
+            {
+                Id = _state.NextMissionId++,
+                Type = MissionType.Survey,
+                TargetOre = oreType,
+                AssignedAssetId = 0,
+                Status = MissionStatus.PendingAssignment,
+                CreatedTick = tick
+            });
+            return true;
+        }
+
         // Demand-driven: create one Mine mission for a specific deposit (e.g. production needs its ore),
         // unless that deposit already has an active mission. Returns true if a mission was created.
         public bool CreateMineMission(long depositId, long tick)

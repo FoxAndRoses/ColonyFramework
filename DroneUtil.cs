@@ -302,6 +302,18 @@ namespace ColonyFramework
             for (int i = 0; i < drills.Count; i++) drills[i].Enabled = on;
         }
 
+        // First working ore detector on the grid (survey-capability check; also feeds the round-robin scan).
+        public static IMyOreDetector FindOreDetector(IMyCubeGrid grid)
+        {
+            var ts = MyAPIGateway.TerminalActionsHelper.GetTerminalSystemForGrid(grid);
+            if (ts == null) return null;
+            var dets = new List<IMyOreDetector>();
+            ts.GetBlocksOfType(dets);
+            for (int i = 0; i < dets.Count; i++)
+                if (dets[i].IsWorking) return dets[i];
+            return null;
+        }
+
         public static List<IMyShipWelder> FindWelders(IMyCubeGrid grid)
         {
             var welders = new List<IMyShipWelder>();

@@ -165,7 +165,7 @@
 <!-- ======================= HERO ======================= -->
 <div class="hero">
   <h1>Colony <span>Framework</span></h1>
-  <p class="tag">A Space Engineers mod that coordinates autonomous mining drones into a believable, self-managing colony. Real drills, real voxels — the intelligence is in the coordination, not faked mining.</p>
+  <p class="tag">A Space Engineers mod that coordinates autonomous drones into a believable, self-managing colony — it surveys for ore, mines it, produces components, and prints ships in shipyard stages. Real drills, real welders, real voxels — the intelligence is in the coordination, not fakery.</p>
   <div class="badges">
     <span class="badge">Space Engineers</span>
     <span class="badge">Server-authoritative</span>
@@ -200,14 +200,16 @@
 <!-- ======================= FEATURES ======================= -->
 <section id="features">
   <h2>Features</h2>
-  <p class="lead">What's working in-game today.</p>
+  <p class="lead">The colony runs itself: survey → mine → produce → print.</p>
   <div class="grid">
     <div class="card"><h3><span class="ico">▣</span>Colony Identity</h3><p>A Colony Core block founds a colony with a name, founder, and creation date. Multi-colony support keyed by faction or player.</p></div>
-    <div class="card"><h3><span class="ico">⛏</span>Ore Discovery</h3><p>Bounded LOD voxel scans, manual (<code>/colony scan</code>) and automatic via round-robin powered ore detectors, with 50 m dedup merge radius.</p></div>
-    <div class="card"><h3><span class="ico">▤</span>Mission System</h3><p>One mine mission per unclaimed deposit, with a full claim → assign → in-progress → complete/fail state machine.</p></div>
-    <div class="card"><h3><span class="ico">⚙</span>Asset Assignment</h3><p>Register miner grids, detect offline assets, and assign the nearest idle drone to pending missions automatically.</p></div>
-    <div class="card"><h3><span class="ico">🛰</span>Autonomous Drones</h3><p>Commission self-test → autopilot transit → gyro-stabilized bore → cargo/timeout watchdogs → retreat climb, all under direct flight control.</p></div>
-    <div class="card"><h3><span class="ico">📊</span>Resource Tracking</h3><p>Owner-filtered scan of the colony's grid group totals ore, ingots, and components on a 30-second cadence or on demand.</p></div>
+    <div class="card"><h3><span class="ico">⛏</span>Autonomous Mining</h3><p>Full loop: transit → bore with <em>yield-based dynamic depth</em> (drills until the ore runs out) → staged connector docking → cargo unload → draw-derived recharge → automatic re-dispatch. Ice/stone gets ejected on site, not hauled home.</p></div>
+    <div class="card"><h3><span class="ico">🏭</span>Production Pipeline</h3><p>Reads the projector blueprint's bill of materials, rolls it up components → ingots → ore against stock, auto-queues assemblers, keeps refineries fed, and orders targeted mining for what's missing.</p></div>
+    <div class="card"><h3><span class="ico">🔧</span>Ship Printing</h3><p>Welder drones load components, fly radial outside-in approaches, and weld the blueprint in <em>shipyard stages</em>: frame → internals → hull closure, so interiors go in while the hull is open.</p></div>
+    <div class="card"><h3><span class="ico">📡</span>Survey Drones</h3><p>When production needs an ore the colony doesn't know, a scout flies an expanding low-altitude search ring — terrain-following waypoints, one bounded scan per point, coverage persisted across missions.</p></div>
+    <div class="card"><h3><span class="ico">🛡</span>Obstacle Avoidance</h3><p>Layered stateless sensing on every transit leg: terrain look-ahead, cheap broad-phase entity queries, and a ray fan only when the corridor is actually blocked. No pathfinding — multiplayer-cheap.</p></div>
+    <div class="card"><h3><span class="ico">▤</span>Mission System</h3><p>Mine / Weld / Survey missions with a full claim → assign → in-progress → complete/fail state machine, capability-matched to registered drones.</p></div>
+    <div class="card"><h3><span class="ico">📊</span>Observability</h3><p><code>/colony status</code> live snapshot, HUD GPS markers for every active mission, per-phase log telemetry, and fleet-wide recall.</p></div>
   </div>
 </section>
 
@@ -216,11 +218,11 @@
   <h2>How it works</h2>
   <p class="lead">The autonomous loop, end to end.</p>
   <div class="pipeline">
-    <div class="stage"><div class="n">01</div><h4>Discover</h4><p>Voxel + ore-detector scans surface rare-ore deposits.</p></div>
-    <div class="stage"><div class="n">02</div><h4>Generate</h4><p>Each unclaimed deposit spawns a mine mission.</p></div>
-    <div class="stage"><div class="n">03</div><h4>Assign</h4><p>Nearest idle drone is matched to the mission.</p></div>
-    <div class="stage"><div class="n">04</div><h4>Execute</h4><p>Transit to standoff, align, and bore to ore depth.</p></div>
-    <div class="stage"><div class="n">05</div><h4>Retreat</h4><p>Climb out, complete the mission, return to idle.</p></div>
+    <div class="stage"><div class="n">01</div><h4>Survey</h4><p>Detectors + scout drones find deposits; the DB persists.</p></div>
+    <div class="stage"><div class="n">02</div><h4>Mine</h4><p>Drones bore until the ore runs out, dumping stone/ice on site.</p></div>
+    <div class="stage"><div class="n">03</div><h4>Deliver</h4><p>Dock at base, unload cargo, recharge, relaunch — hands-free.</p></div>
+    <div class="stage"><div class="n">04</div><h4>Produce</h4><p>Refineries and assemblers work toward the projected blueprint.</p></div>
+    <div class="stage"><div class="n">05</div><h4>Print</h4><p>Welder drones build the ship: frame → internals → hull closure.</p></div>
   </div>
 </section>
 
@@ -235,9 +237,12 @@
     <div class="cmd"><code>/colony register</code><span>Register a miner grid</span></div>
     <div class="cmd"><code>/colony assets</code><span>List registered drones</span></div>
     <div class="cmd"><code>/colony resources</code><span>Ore / ingot / component totals</span></div>
-    <div class="cmd"><code>/colony dispatch</code><span>Send an assigned drone</span></div>
+    <div class="cmd"><code>/colony build</code><span>Blueprint vs stock — what's missing</span></div>
+    <div class="cmd"><code>/colony status</code><span>Live mission &amp; drone snapshot</span></div>
+    <div class="cmd"><code>/colony dispatch</code><span>Enable autonomous operations</span></div>
     <div class="cmd"><code>/colony abort</code><span>Hard stop all drones</span></div>
-    <div class="cmd"><code>/colony recall</code><span>Graceful retreat</span></div>
+    <div class="cmd"><code>/colony recall</code><span>Graceful fleet-wide retreat</span></div>
+    <div class="cmd"><code>/colony help</code><span>List all commands</span></div>
   </div>
 </section>
 
@@ -259,13 +264,13 @@
   <h2>Roadmap status</h2>
   <p class="lead">Validated in-game and what's coming next.</p>
   <ul class="status">
-    <li>Persistence, legacy save migration, append-only schema</li>
-    <li>Multi-colony registry keyed by faction / player</li>
-    <li>Ore discovery, mission state machine, asset assignment</li>
-    <li>Autonomous dispatch → bore → retreat (PoCs 1–3)</li>
-    <li>Resource tracking with owner filtering</li>
-    <li class="next"><strong>Next:</strong> close the full loop — return home, staged docking, cargo unload, auto-dispatch</li>
-    <li class="next"><strong>Then:</strong> power tracking, LCD panels, GPS markers, construction advisor</li>
+    <li>Persistence, multi-colony registry, append-only save schema</li>
+    <li>Full mining loop validated: dispatch → bore → return → dock → unload → recharge → re-dispatch</li>
+    <li>Yield-based dynamic bore depth; ice/stone eject excursions; multi-load deposits</li>
+    <li>Production pipeline validated: blueprint rollup → assembler queueing → targeted mining</li>
+    <li>Observability: <code>/colony status</code>, HUD GPS mission markers, fleet recall</li>
+    <li class="next"><strong>In validation:</strong> reactive obstacle avoidance, welder drones (staged ship printing), survey drones</li>
+    <li class="next"><strong>Then:</strong> demand-driven mining (mine only what production needs), shared docking for all drone types, LCD panels</li>
   </ul>
 </section>
 

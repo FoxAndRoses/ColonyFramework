@@ -91,10 +91,8 @@ namespace ColonyFramework
         private const double RecoverLevelTimeoutSecs = 10.0; // max time to gyro-level during a soft reset before resuming anyway
 
         // Docking is connector-relative and uses the DRONE CONNECTOR (not the RC) as the distance
-        // reference. 3 steps: fly over the connector (StageFwd out + StageUp up) → descend straight
-        // down to connector altitude → reverse into the connector at tiered speed. Dampeners stay ON.
+        // reference: approach in front of the connector, shimmy down, reverse in. Dampeners stay ON.
         private const double StageFwd        = 20.0; // m in front of the base connector (staging point for the reverse)
-        private const double StageUp         = 10.0; // (legacy)
         private const double DockClearance   = 1.0;  // m above connector altitude the shimmy bottoms out at (so the reverse is ~horizontal, not fighting dampers)
         // Shimmy descent: zig-zag DOWN in front of the connector via short diagonal autopilot legs
         // (RC autopilot can't go straight down, but it descends a slope fine). Dampeners stay ON.
@@ -107,26 +105,9 @@ namespace ColonyFramework
         private const double BumpDist         = 3.0; // m connector-to-connector that counts as "at the connector" (magnet range)
         private const double BumpFailSecs     = 30.0;// centered & pressed this long without locking → bump failed → retry (time to fine-tune)
         private const double LockTrySecs      = 1.5; // how often to attempt the connector lock (not every tick — that's far too fast)
-        // Velocity-controlled descent: modAPI dampers OFF, our up-thrust modulated by descent rate to
-        // hold a slow "barely descending" rate that eases to 0 at connector altitude (no toggling).
-        private const double DescendTargetRate   = 0.3;  // m/s — slow descent rate we hold ("barely descending")
-        private const double DescendEaseGain     = 0.2;  // target rate = min(DescendTargetRate, |vErr|*this) — eases to 0 near target
-        private const double DescendThrottleGain = 0.8;  // up-thrust (×weight) added per m/s of rate error
-        private const double DescendMinThrottle  = 0.92; // gentle sink only (~0.8 m/s²) so it never builds speed it must hard-brake
-        private const double DescendMaxThrottle  = 2.0;  // command up to 2× weight to brake (drone delivers what it can)
-        private const double DescendBumpRate     = 0.3;  // if below target, climb at this rate (bump up)
-        private const double DescendStuckSecs    = 30.0; // no altitude progress for this long → recover (lenient window)
-        private const double DescendPanicSpeed   = 3.0;  // if descent exceeds this, hand to modAPI dampers (anti-slam)
         private const double DockMoveSpeed   = 6.0;  // cruise cap flying over to the staging point
         private const double DockArriveTol   = 3.0;  // arrival tolerance at the staging / altitude points
         private const double DockSettleSpeed = 0.5;  // m/s "settled" threshold before advancing a leg
-        private const double DockMaxSafeSpeed = 12.0; // m/s — if the dampeners-off controller runs away, panic-stop
-        private const double DockDescendSpeed = 1.0; // base m/s cap for the dampers-off dock pilot (scaled down each retry)
-        // Per-axis pilot deadbands (dampers-off dock): inside these the drone just holds — no hunting.
-        private const double AltDeadband     = 0.5;   // m vertical tolerance to count as "at connector altitude"
-        private const double NavVelDeadband  = 0.2;   // m/s velocity tolerance the pilot ignores (anti-oscillation)
-        private const double NavSettleSpeed  = 0.3;   // m/s "settled" threshold before a dampers-off sub-state advances
-        private const double AlignHoldDot    = 0.9995;// once this aligned, stop gyro micro-correction (anti-oscillation)
         private const double DockAlignDot    = 0.98; // drone connector forward vs -base forward
         private const double CrawlFarDist    = 10.0; // > this: crawl fast tier
         private const double CrawlMidDist    = 5.0;  // > this: crawl mid tier (else near tier)
@@ -144,8 +125,6 @@ namespace ColonyFramework
         private const double ChargeTargetMinutes = 10.0; // size the battery buffer for ~a mission's worth of full-load deficit
         private const double ChargeProgressEps   = 0.01; // a 1% rise counts as charging progress (resets the stall timer)
         private const double ChargeStallSecs     = 60.0; // charge plateaued this long → can't go higher, dispatch anyway (log it)
-        private const double DockRunawayMargin = 4.0; // m past closest approach on a dampers-off dock leg = overshoot → recover
-        private const double DockBelowTol     = 1.5;  // m below connector altitude tolerated before climbing back up
         private const double DockUnloadSecs  = 30.0; // max time to drain cargo once locked before completing anyway
         private const double DockTimeoutSecs = 180;  // give up → complete near base
 
@@ -205,7 +184,6 @@ namespace ColonyFramework
         private int _recoverResume;   // the phase to re-acquire once leveled
         private DateTime _recoverStart;
         private DateTime _lastGroundAvoid; // throttle for mid-cruise climb re-engages
-        private double _dockSpeedScale = 1.0; // soft failsafe: each dock retry crawls slower
         private int _boreIndex;
         private bool _oriented;
         private DateTime _subStart;
@@ -1275,17 +1253,6 @@ namespace ColonyFramework
             }
         }
 
-        // Watchdog for a DAMPENERS-OFF dock leg (lineup/reverse): returns true if the connector has
-        // overshot its closest approach by DockRunawayMargin, or made no progress for LegStuckSecs.
-        private bool DockWatch(double dist)
-        {
-            if (dist < _legMinDist - LegProgressEps) { _legMinDist = dist; _legProgressTime = DateTime.UtcNow; }
-            else if (dist < _legMinDist) _legMinDist = dist;
-            bool overshoot = dist > _legMinDist + DockRunawayMargin;
-            bool stuck = (DateTime.UtcNow - _legProgressTime).TotalSeconds > LegStuckSecs;
-            return overshoot || stuck;
-        }
-
         // Reliable dock fallback: stabilise (DAMPENERS ON, overrides cleared), fly back to the core
         // standoff, then restart the dock — up to MaxRetries, after which announce the error and fail.
         private void DockFallback(Colony colony, Mission m, IMyCubeGrid grid, string reason)
@@ -1300,9 +1267,8 @@ namespace ColonyFramework
                 FailMission(colony, m, grid, reason);
                 return;
             }
-            _dockSpeedScale = System.Math.Max(0.25, _dockSpeedScale * 0.6); // soft failsafe: retry the dock slower
             MyLog.Default.WriteLineAndConsole(string.Format(
-                "[ColonyFramework] Mission {0}: dock retry {1}/{2} — {3}, soft reset (speed x{4:F2})", m.Id, _retries, MaxRetries, reason, _dockSpeedScale));
+                "[ColonyFramework] Mission {0}: dock retry {1}/{2} — {3}, soft reset", m.Id, _retries, MaxRetries, reason));
             BeginRecover(grid, PhaseDock); // stop + gyro-level, then climb to the core standoff and re-dock
         }
 

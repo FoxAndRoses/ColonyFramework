@@ -486,7 +486,14 @@ namespace ColonyFramework
             if (rc2 != null) rc2.SetAutoPilotEnabled(false);
             if (_nav.Speed > SettleSpeed) return; // let dampers stop it
             _retries = 0;
-            BeginDockLoad(colony, m, grid); // dock -> load -> charge -> back to the site
+            if (_returningToResupply) BeginDockLoad(colony, m, grid); // dock -> load -> charge -> back to the site
+            else Complete(colony, m, grid, "recalled to base");       // graceful recall: stop here, mission over
+        }
+
+        // Graceful back-out (/colony recall): stop welding and fly home; mission completes at the standoff.
+        public void Recall(Colony colony, Mission m, IMyCubeGrid grid)
+        {
+            BeginReturn(colony, m, grid, false);
         }
 
         // ── Compact dock machine (port of the miner's PROVEN approach/shimmy/align/reverse) ─────────

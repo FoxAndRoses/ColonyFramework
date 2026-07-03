@@ -90,14 +90,21 @@ namespace ColonyFramework
             for (int i = 0; i < ms.Count; i++)
             {
                 var m = ms[i];
-                if (m.Type != MissionType.Mine) continue;
-                if (m.Status != MissionStatus.InProgress || m.Phase >= PhaseRetreat) continue;
-                var deposit = colony.Deposits.GetById(m.TargetDepositId);
+                if (m.Status != MissionStatus.InProgress) continue;
                 var grid = MyAPIGateway.Entities.GetEntityById(m.AssignedAssetId) as IMyCubeGrid;
-                if (deposit == null || grid == null) continue;
+                if (grid == null) continue;
                 var asset = colony.Assets.GetByEntityId(m.AssignedAssetId);
                 if (asset != null) asset.AutoDispatchEnabled = false; // park after it returns; /colony dispatch to resume
-                GetController(m.Id).Recall(m, deposit, grid);
+
+                if (m.Type == MissionType.Mine)
+                {
+                    if (m.Phase >= PhaseRetreat) continue; // already on its way home
+                    var deposit = colony.Deposits.GetById(m.TargetDepositId);
+                    if (deposit == null) continue;
+                    GetController(m.Id).Recall(m, deposit, grid);
+                }
+                else if (m.Type == MissionType.Weld) GetWelder(m.Id).Recall(colony, m, grid);
+                else if (m.Type == MissionType.Survey) GetSurvey(m.Id).Recall(colony, m, grid);
             }
         }
 

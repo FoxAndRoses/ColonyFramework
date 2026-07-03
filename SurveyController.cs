@@ -296,6 +296,12 @@ namespace ColonyFramework
             Fail(colony, m, grid, "aborted by command");
         }
 
+        // Graceful back-out (/colony recall): head home; the coverage cursor is already persisted.
+        public void Recall(Colony colony, Mission m, IMyCubeGrid grid)
+        {
+            BeginReturn(colony, m, grid);
+        }
+
         private void Cleanup(IMyCubeGrid grid)
         {
             if (grid == null) return;

@@ -34,6 +34,7 @@ namespace ColonyFramework
         private readonly DroneExecutor _executor = new DroneExecutor();
         private readonly DispatchService _dispatch = new DispatchService();
         private readonly ProductionService _production = new ProductionService();
+        private readonly GpsService _gps = new GpsService();
 
         private int _tick;
         private long _scanTick;
@@ -128,6 +129,8 @@ namespace ColonyFramework
                     // Isolate the production/definition API (new, higher-surface) so a hiccup can't kill the tick.
                     try { _production.Tick(colony); }
                     catch (Exception e) { MyLog.Default.WriteLineAndConsole("[ColonyFramework] production error: " + e.Message); }
+                    try { _gps.Sync(colony); } // HUD markers for active missions (same slow cadence)
+                    catch (Exception e) { MyLog.Default.WriteLineAndConsole("[ColonyFramework] gps error: " + e.Message); }
                 }
             }
 

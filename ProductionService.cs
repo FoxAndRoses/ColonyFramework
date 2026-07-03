@@ -301,6 +301,21 @@ namespace ColonyFramework
             return result;
         }
 
+        // Ice is only worth mining when something can USE it: O2/H2 generators consume it (keep a
+        // working buffer), and otherwise a small reserve stays on hand so the player can fill
+        // hydrogen bottles — but the colony should never dedicate mining runs to ice nobody needs.
+        private const double IceReserveBase  = 2000.0;  // no gas equipment: just the bottle reserve
+        private const double IceReserveEquip = 10000.0; // gas generators present: keep them fed
+        public bool AllowIceMining(Colony colony)
+        {
+            var core = MyAPIGateway.Entities.GetEntityById(colony.State.CoreEntityId) as IMyCubeBlock;
+            if (core == null) return false;
+            double ice;
+            colony.Resources.Ore.TryGetValue("Ice", out ice);
+            bool hasGasEquipment = CollectGroup<IMyGasGenerator>(core.CubeGrid).Count > 0;
+            return ice < (hasGasEquipment ? IceReserveEquip : IceReserveBase);
+        }
+
         // Any deposit of this ore in the DB at all (claimed, unclaimed, or being mined)? Depleted ones
         // don't count — a fully-mined ore type is as unknown as a never-seen one.
         private static bool HasAnyDeposit(Colony colony, string oreType)

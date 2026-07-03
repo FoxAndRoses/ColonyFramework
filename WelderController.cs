@@ -148,6 +148,7 @@ namespace ColonyFramework
                 ? DockLoading : DockApproach;
             if (_dockSub == DockApproach)
             {
+                DroneUtil.ReleaseGrid(grid); // autopilot does NOT release landing gear/connectors — unlock or it fights the pad
                 Vector3D standoff;
                 if (TryCoreStandoff(colony, out standoff)) CruiseTo(grid, standoff, (float)DockMoveSpeed, "base standoff", null);
             }

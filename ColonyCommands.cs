@@ -21,7 +21,7 @@ namespace ColonyFramework
             "/colony info — name, age, deposit count",
             "/colony scan — scan ore near you",
             "/colony missions — mission counts",
-            "/colony register — claim nearest drone as a miner",
+            "/colony register — register nearest drone (auto-detects miner/welder)",
             "/colony assets — drone roster",
             "/colony resources — ore / ingot / component stock",
             "/colony build — projector blueprint vs stock (missing parts)",

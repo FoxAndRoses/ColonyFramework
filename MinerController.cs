@@ -151,6 +151,7 @@ namespace ColonyFramework
 
         private bool _started; // first Advance seen (distinguishes a fresh/resumed controller)
         private bool _commissionStarted;
+        private bool _commissionHeld; // anchored (connector/gear) for the load-test spike
         private DateTime _commissionStart;
         private DateTime _boreStart;
         private Vector3D _progressPos;
@@ -262,11 +263,31 @@ namespace ColonyFramework
             {
                 _commissionStarted = true;
                 _commissionStart = DateTime.UtcNow;
-                DroneUtil.SetSpike(grid, true); // all thrusters + drills, for a real worst-case load reading
+                // ANCHOR before the load test: a full-thrust spike on a free-sitting drone shoves it
+                // off the pad (seen in testing: fell off the connector, thrashed on the ground).
+                // Re-lock the connector if it's in range, lock any landing gear — only spike if held.
+                var con = DroneUtil.FindConnector(grid);
+                if (con != null && con.Status == MyShipConnectorStatus.Connectable) con.Connect();
+                _commissionHeld = DroneUtil.LockGear(grid)
+                    || (con != null && con.Status == MyShipConnectorStatus.Connected);
+                if (_commissionHeld) DroneUtil.SetSpike(grid, true); // all thrusters + drills, worst-case load
                 return;
             }
 
             if ((DateTime.UtcNow - _commissionStart).TotalSeconds < CommissionSpikeSecs) return;
+
+            if (!_commissionHeld)
+            {
+                // Nothing to anchor to — skip the physical load test rather than launch the drone
+                // across the pad; fall back to the floor recharge target.
+                _requiredChargePct = ChargeFloorPct;
+                MyLog.Default.WriteLineAndConsole(string.Format(
+                    "[ColonyFramework] Mission {0}: commissioned (no anchor — load test skipped, recharge target {1:F0}%), dispatching",
+                    m.Id, _requiredChargePct * 100));
+                EngageTransit(grid, deposit);
+                m.Phase = PhaseTransit;
+                return;
+            }
 
             double stored, cap, reactorOut, batOut;
             DroneUtil.MeasurePower(grid, out stored, out cap, out reactorOut, out batOut);
@@ -1281,8 +1302,7 @@ namespace ColonyFramework
             if (rc != null) rc.DampenersOverride = true; // locked to base; dampers on
             _dockSub = DockUnload;
             _unloadStart = DateTime.UtcNow;
-            if (!MyAPIGateway.Utilities.IsDedicated)
-                MyAPIGateway.Utilities.ShowMessage("Colony", "Docked at base, transferring cargo");
+            // Routine dock/unload is log-only — chat is reserved for things the player must act on.
             MyLog.Default.WriteLineAndConsole(string.Format(
                 "[ColonyFramework] Mission {0}: docked + locked, transferring cargo to base", m.Id));
         }
@@ -1299,8 +1319,6 @@ namespace ColonyFramework
             MyLog.Default.WriteLineAndConsole(string.Format(
                 "[ColonyFramework] Mission {0}: cargo transfer {1} (drone fill {2:N0}%)",
                 m.Id, empty ? "complete" : "timed out", fill * 100));
-            if (!MyAPIGateway.Utilities.IsDedicated)
-                MyAPIGateway.Utilities.ShowMessage("Colony", empty ? "Mining mission complete, cargo delivered" : "Docked; cargo transfer incomplete");
             BeginCharge(m, grid); // stay locked and recharge before releasing for the next mission
         }
 

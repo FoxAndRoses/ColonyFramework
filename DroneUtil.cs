@@ -459,6 +459,23 @@ namespace ColonyFramework
             }
         }
 
+        // Lock all landing gear (true if at least one actually locked) — anchors the drone during the
+        // commissioning load test so the full-thrust spike can't shove it off the pad.
+        public static bool LockGear(IMyCubeGrid grid)
+        {
+            var ts = MyAPIGateway.TerminalActionsHelper.GetTerminalSystemForGrid(grid);
+            if (ts == null) return false;
+            var gears = new List<SpaceEngineers.Game.ModAPI.IMyLandingGear>();
+            ts.GetBlocksOfType(gears);
+            bool locked = false;
+            for (int i = 0; i < gears.Count; i++)
+            {
+                gears[i].Lock();
+                if (gears[i].IsLocked) locked = true;
+            }
+            return locked;
+        }
+
         // Unlock landing gear and disconnect connectors so the drone can launch.
         public static void ReleaseGrid(IMyCubeGrid grid)
         {

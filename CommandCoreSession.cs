@@ -103,7 +103,7 @@ namespace ColonyFramework
                 foreach (var colony in _registry.Colonies)
                 {
                     if (!colony.Active) continue;
-                    int made = colony.Missions.GenerateMineMissions(_scanTick);
+                    int made = colony.Missions.GenerateMineMissions(_scanTick, _production.AllowIceMining(colony));
                     if (made > 0)
                         MyLog.Default.WriteLineAndConsole(string.Format(
                             "[ColonyFramework] Colony {0}: generated {1} mine missions; total: {2}",

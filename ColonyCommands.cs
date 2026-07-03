@@ -161,10 +161,15 @@ namespace ColonyFramework
                     MyAPIGateway.Utilities.ShowMessage("Colony", "no eligible drone grid within 100m (the base/core is excluded)");
                     return;
                 }
-                colony.Assets.Register(nearest.EntityId, AssetType.Miner, nearest.GetPosition(), nearest.DisplayName);
+                // Classify by tooling: drills -> Miner (wins if both), welders -> Welder.
+                AssetType type = DroneUtil.FindDrills(nearest).Count > 0 ? AssetType.Miner
+                    : DroneUtil.FindWelders(nearest).Count > 0 ? AssetType.Welder
+                    : AssetType.Miner;
+                colony.Assets.Register(nearest.EntityId, type, nearest.GetPosition(), nearest.DisplayName);
                 _executor.ReleaseControls(nearest); // clear any stale overrides so it won't thrust on its own
                 MyAPIGateway.Utilities.ShowMessage("Colony", string.Format(
-                    "registered '{0}' as miner ({1} assets total)", nearest.DisplayName, colony.Assets.Assets.Count));
+                    "registered '{0}' as {1} ({2} assets total)", nearest.DisplayName,
+                    type == AssetType.Welder ? "welder" : "miner", colony.Assets.Assets.Count));
                 return;
             }
 

@@ -302,6 +302,77 @@ namespace ColonyFramework
             for (int i = 0; i < drills.Count; i++) drills[i].Enabled = on;
         }
 
+        public static List<IMyShipWelder> FindWelders(IMyCubeGrid grid)
+        {
+            var welders = new List<IMyShipWelder>();
+            var ts = MyAPIGateway.TerminalActionsHelper.GetTerminalSystemForGrid(grid);
+            if (ts != null) ts.GetBlocksOfType(welders);
+            return welders;
+        }
+
+        public static void SetWelders(IMyCubeGrid grid, bool on)
+        {
+            var welders = FindWelders(grid);
+            for (int i = 0; i < welders.Count; i++) welders[i].Enabled = on;
+        }
+
+        // Pull components from the docked base into the drone's cargo (inverse of UnloadCargo):
+        // for each wanted subtype, transfer items from base-group inventories until the drone holds
+        // 'amount' of it (or the base runs out / drone cargo fills). Returns how many item stacks moved.
+        public static int LoadComponents(IMyCubeGrid drone, IMyShipConnector droneCon, Dictionary<string, double> want)
+        {
+            var baseCon = droneCon != null ? droneCon.OtherConnector : null;
+            if (baseCon == null || want == null || want.Count == 0) return 0;
+
+            var srcs = new List<IMyInventory>();
+            GatherInventories(baseCon.CubeGrid, srcs, drone, true); // base group, excluding the drone
+
+            var dsts = new List<IMyInventory>();
+            GatherInventories(drone, dsts, null, false);            // drone grid only
+
+            int moved = 0;
+            var items = new List<MyInventoryItem>();
+            foreach (var kv in want)
+            {
+                double need = kv.Value - CountComponent(dsts, kv.Key); // already aboard counts
+                if (need <= 0) continue;
+                for (int s = 0; s < srcs.Count && need > 0; s++)
+                {
+                    items.Clear();
+                    srcs[s].GetItems(items);
+                    for (int it = items.Count - 1; it >= 0 && need > 0; it--) // reverse: transfers shift indices
+                    {
+                        var item = items[it];
+                        if (item.Type.TypeId != "MyObjectBuilder_Component" || item.Type.SubtypeId != kv.Key) continue;
+                        for (int d = 0; d < dsts.Count; d++)
+                        {
+                            if (!srcs[s].TransferItemTo(dsts[d], it)) continue;
+                            moved++;
+                            need -= (double)item.Amount; // whole stack moved (or as much as fit)
+                            break;
+                        }
+                    }
+                }
+            }
+            return moved;
+        }
+
+        // Sum of one component subtype across a set of inventories.
+        private static double CountComponent(List<IMyInventory> invs, string subtype)
+        {
+            double total = 0;
+            var items = new List<MyInventoryItem>();
+            for (int i = 0; i < invs.Count; i++)
+            {
+                items.Clear();
+                invs[i].GetItems(items);
+                for (int it = 0; it < items.Count; it++)
+                    if (items[it].Type.TypeId == "MyObjectBuilder_Component" && items[it].Type.SubtypeId == subtype)
+                        total += (double)items[it].Amount;
+            }
+            return total;
+        }
+
         // Force all batteries to Recharge (pull power from the docked base) or back to Auto for flight.
         public static void SetBatteriesRecharge(IMyCubeGrid grid, bool recharge)
         {

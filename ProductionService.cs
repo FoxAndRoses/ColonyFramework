@@ -63,6 +63,20 @@ namespace ColonyFramework
             if (!status.Projecting) { _state.Remove(colony.OwnerKey); return; }
             var st = GetState(colony.OwnerKey);
 
+            // A projecting blueprint with blocks left gets a Weld mission (one per projector). Welding
+            // runs in PARALLEL with component production — CanBuild + cargo gate what's actually weldable.
+            var projectors = CollectGroup<IMyProjector>(grid);
+            long nowTick = MyAPIGateway.Session.GameDateTime.Ticks;
+            for (int i = 0; i < projectors.Count; i++)
+            {
+                var p = projectors[i];
+                if (p == null || !p.IsProjecting || p.RemainingBlocks <= 0) continue;
+                if (colony.Missions.EnsureWeldMission(p.EntityId, nowTick))
+                    MyLog.Default.WriteLineAndConsole(string.Format(
+                        "[ColonyFramework] production: weld mission created for projector {0} ({1} blocks remaining)",
+                        p.EntityId, p.RemainingBlocks));
+            }
+
             if (status.MissingComponents.Count == 0) { st.ReadySince = default(DateTime); return; } // nothing to make
 
             if (status.CanBuildNow)

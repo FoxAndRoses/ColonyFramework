@@ -12,6 +12,7 @@ namespace ColonyFramework
         private const int PhaseRetreat = 4;
 
         private readonly Dictionary<long, MinerController> _controllers = new Dictionary<long, MinerController>();
+        private readonly Dictionary<long, WelderController> _welders = new Dictionary<long, WelderController>();
         private readonly BoreController _bore = new BoreController(); // for ReleaseControls only
         private readonly List<long> _stale = new List<long>();
 
@@ -19,25 +20,40 @@ namespace ColonyFramework
         {
             var ms = colony.Missions.Missions;
             var active = new HashSet<long>();
+            var activeWeld = new HashSet<long>();
 
             for (int i = 0; i < ms.Count; i++)
             {
                 var m = ms[i];
-                if (m.Status != MissionStatus.InProgress || m.Type != MissionType.Mine) continue;
+                if (m.Status != MissionStatus.InProgress) continue;
 
-                var deposit = colony.Deposits.GetById(m.TargetDepositId);
                 var grid = MyAPIGateway.Entities.GetEntityById(m.AssignedAssetId) as IMyCubeGrid;
-                if (deposit == null || grid == null) continue;
+                if (grid == null) continue;
 
-                active.Add(m.Id);
-                GetController(m.Id).Advance(colony, m, deposit, grid);
+                if (m.Type == MissionType.Mine)
+                {
+                    var deposit = colony.Deposits.GetById(m.TargetDepositId);
+                    if (deposit == null) continue;
+                    active.Add(m.Id);
+                    GetController(m.Id).Advance(colony, m, deposit, grid);
+                }
+                else if (m.Type == MissionType.Weld)
+                {
+                    activeWeld.Add(m.Id);
+                    GetWelder(m.Id).Advance(colony, m, grid);
+                }
             }
 
-            // Drop controllers whose mission is no longer an active in-progress mine mission.
+            // Drop controllers whose mission is no longer active in-progress.
             _stale.Clear();
             foreach (var key in _controllers.Keys)
                 if (!active.Contains(key)) _stale.Add(key);
             for (int i = 0; i < _stale.Count; i++) _controllers.Remove(_stale[i]);
+
+            _stale.Clear();
+            foreach (var key in _welders.Keys)
+                if (!activeWeld.Contains(key)) _stale.Add(key);
+            for (int i = 0; i < _stale.Count; i++) _welders.Remove(_stale[i]);
         }
 
         public void AbortAll(Colony colony)
@@ -46,13 +62,12 @@ namespace ColonyFramework
             for (int i = 0; i < ms.Count; i++)
             {
                 var m = ms[i];
-                if (m.Type != MissionType.Mine) continue;
                 if (m.Status != MissionStatus.Assigned && m.Status != MissionStatus.InProgress) continue;
                 var grid = MyAPIGateway.Entities.GetEntityById(m.AssignedAssetId) as IMyCubeGrid;
                 var asset = colony.Assets.GetByEntityId(m.AssignedAssetId);
                 if (asset != null) asset.AutoDispatchEnabled = false; // park: don't auto-relaunch after an abort
-                GetController(m.Id).Abort(colony, m, grid);
-                _controllers.Remove(m.Id);
+                if (m.Type == MissionType.Mine) { GetController(m.Id).Abort(colony, m, grid); _controllers.Remove(m.Id); }
+                else if (m.Type == MissionType.Weld) { GetWelder(m.Id).Abort(colony, m, grid); _welders.Remove(m.Id); }
             }
         }
 
@@ -84,6 +99,13 @@ namespace ColonyFramework
         {
             MinerController c;
             if (!_controllers.TryGetValue(missionId, out c)) { c = new MinerController(); _controllers[missionId] = c; }
+            return c;
+        }
+
+        private WelderController GetWelder(long missionId)
+        {
+            WelderController c;
+            if (!_welders.TryGetValue(missionId, out c)) { c = new WelderController(); _welders[missionId] = c; }
             return c;
         }
     }

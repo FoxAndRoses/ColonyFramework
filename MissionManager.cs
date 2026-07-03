@@ -42,6 +42,32 @@ namespace ColonyFramework
             return created;
         }
 
+        // One Weld mission per projector: the welder drone builds the projected blueprint. Created when
+        // production sees an active projection with remaining blocks; no-op while one is already active.
+        public bool EnsureWeldMission(long projectorEntityId, long tick)
+        {
+            for (int i = 0; i < _state.Missions.Count; i++)
+            {
+                var m = _state.Missions[i];
+                if (m.Type == MissionType.Weld && m.TargetEntityId == projectorEntityId &&
+                    (m.Status == MissionStatus.PendingAssignment ||
+                     m.Status == MissionStatus.Assigned ||
+                     m.Status == MissionStatus.InProgress))
+                    return false;
+            }
+            _state.Missions.Add(new Mission
+            {
+                Id = _state.NextMissionId++,
+                Type = MissionType.Weld,
+                TargetDepositId = 0,
+                TargetEntityId = projectorEntityId,
+                AssignedAssetId = 0,
+                Status = MissionStatus.PendingAssignment,
+                CreatedTick = tick
+            });
+            return true;
+        }
+
         // Demand-driven: create one Mine mission for a specific deposit (e.g. production needs its ore),
         // unless that deposit already has an active mission. Returns true if a mission was created.
         public bool CreateMineMission(long depositId, long tick)
@@ -69,12 +95,13 @@ namespace ColonyFramework
             return null;
         }
 
-        // PendingAssignment -> Assigned. Claims the target deposit for the asset.
+        // PendingAssignment -> Assigned. Mine missions claim their target deposit; Weld missions have
+        // no deposit (their target is a projector entity), so they skip the claim.
         public bool Assign(long missionId, long assetEntityId)
         {
             var m = GetById(missionId);
             if (m == null || m.Status != MissionStatus.PendingAssignment) return false;
-            if (!_deposits.TryClaim(m.TargetDepositId, assetEntityId)) return false;
+            if (m.Type == MissionType.Mine && !_deposits.TryClaim(m.TargetDepositId, assetEntityId)) return false;
             m.AssignedAssetId = assetEntityId;
             m.Status = MissionStatus.Assigned;
             return true;

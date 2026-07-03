@@ -99,9 +99,23 @@ namespace ColonyFramework
                 var m = ms[i];
                 if (m.Status != MissionStatus.PendingAssignment) continue;
 
-                var dep = colony.Deposits.GetById(m.TargetDepositId);
-                if (dep == null) continue;
-                Vector3D dpos = dep.Position;
+                // Mission target position: deposit for Mine, projector block for Weld.
+                Vector3D dpos;
+                AssetType wantType;
+                if (m.Type == MissionType.Weld)
+                {
+                    var proj = MyAPIGateway.Entities.GetEntityById(m.TargetEntityId);
+                    if (proj == null) continue;
+                    dpos = proj.GetPosition();
+                    wantType = AssetType.Welder;
+                }
+                else
+                {
+                    var dep = colony.Deposits.GetById(m.TargetDepositId);
+                    if (dep == null) continue;
+                    dpos = dep.Position;
+                    wantType = AssetType.Miner;
+                }
 
                 AssetRecord best = null;
                 double bestSq = double.MaxValue;
@@ -109,11 +123,11 @@ namespace ColonyFramework
                 for (int j = 0; j < assets.Count; j++)
                 {
                     var a = assets[j];
-                    if (a.Status != AssetStatus.Idle) continue;
+                    if (a.Status != AssetStatus.Idle || a.Type != wantType) continue;
                     double sq = Vector3D.DistanceSquared(a.LastPosition, dpos);
                     if (sq < bestSq) { bestSq = sq; best = a; }
                 }
-                if (best == null) break;
+                if (best == null) continue; // no idle asset of this TYPE — other mission types may still match
 
                 if (colony.Missions.Assign(m.Id, best.EntityId))
                 {

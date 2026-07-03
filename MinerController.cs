@@ -168,6 +168,7 @@ namespace ColonyFramework
 
         private readonly BoreController _bore = new BoreController();
         private readonly NavState _nav = new NavState(); // situational awareness, refreshed each tick
+        private readonly AvoidanceProbe _avoid = new AvoidanceProbe(); // reactive obstacle sensing (transit legs)
 
         private bool _started; // first Advance seen (distinguishes a fresh/resumed controller)
         private bool _commissionStarted;
@@ -339,7 +340,7 @@ namespace ColonyFramework
         // safe cruise altitude first (if below it), then fly diagonally to the high standoff — so the
         // drone never skims terrain on a straight A→B line. RC autopilot can climb up and descend
         // diagonally fine; it just can't pitch straight down, so the route never ends straight below.
-        private void EngageCruise(IMyCubeGrid grid, Vector3D target, float speed, string label)
+        private void EngageCruise(IMyCubeGrid grid, Vector3D target, float speed, string label, Vector3D? via = null)
         {
             var rc = DroneUtil.FindRc(grid);
             if (rc == null) return;
@@ -349,6 +350,7 @@ namespace ColonyFramework
             double agl;
             if (DroneUtil.TryGetAltitude(grid, out agl) && agl < CruiseAltitudeAgl)
                 rc.AddWaypoint(pos + Up(pos) * (CruiseAltitudeAgl - agl), "climb to cruise");
+            if (via.HasValue) rc.AddWaypoint(via.Value, "avoid detour"); // one transient detour point — re-derived each probe, never stored
             rc.AddWaypoint(target, label);
             rc.FlightMode = FlightMode.OneWay;
             rc.SpeedLimit = speed;
@@ -384,6 +386,20 @@ namespace ColonyFramework
                 if (rc2 != null && !rc2.DampenersOverride) rc2.DampenersOverride = true;
                 if (rc2 != null) rc2.SpeedLimit = CruiseSpeed(colony, grid.GetPosition(), standoff); // fast in open air, slow near base/deposit
                 if (NeedsClimb(grid, m, "transit")) { EngageTransit(grid, deposit); return; } // active ground avoidance
+                // Reactive obstacle avoidance: if the corridor ahead is blocked (terrain rise / another
+                // grid), re-issue the route through a detour point. Same throttle as NeedsClimb; the
+                // probe is stateless — next ticks re-sense and the unbiased route resumes when clear.
+                Vector3D via; string obstacle;
+                if (_avoid.TryGetDetour(_nav, grid, standoff, out via, out obstacle)
+                    && (DateTime.UtcNow - _lastGroundAvoid).TotalSeconds >= ClimbReengageSecs)
+                {
+                    _lastGroundAvoid = DateTime.UtcNow;
+                    EngageCruise(grid, standoff, CruiseSpeedLimit, "Deposit " + deposit.Id + " standoff", via);
+                    MyLog.Default.WriteLineAndConsole(string.Format(
+                        "[ColonyFramework] Mission {0}: deflected around obstacle {1} at ({2:F0}, {3:F0}, {4:F0}), resumed heading",
+                        m.Id, obstacle, via.X, via.Y, via.Z));
+                    return;
+                }
                 Narrate(m, "transit", standoff);
                 string fail = LegOk(dist, TransitTimeoutSecs, "transit");
                 if (fail != null) RetryOrFail(colony, m, deposit, grid, fail);
@@ -907,6 +923,17 @@ namespace ColonyFramework
                 if (rcd != null && !rcd.DampenersOverride) rcd.DampenersOverride = true; // heal only if off (autopilot needs it to brake)
                 if (rcd != null) rcd.SpeedLimit = CruiseSpeed(colony, pos, coreStandoff); // fast in open air, slow near base
                 if (NeedsClimb(grid, m, "return")) { EngageReturn(colony, grid); return; } // active ground avoidance
+                Vector3D rvia; string robstacle;
+                if (_avoid.TryGetDetour(_nav, grid, coreStandoff, out rvia, out robstacle)
+                    && (DateTime.UtcNow - _lastGroundAvoid).TotalSeconds >= ClimbReengageSecs)
+                {
+                    _lastGroundAvoid = DateTime.UtcNow;
+                    EngageCruise(grid, coreStandoff, CruiseSpeedLimit, "Colony core standoff", rvia);
+                    MyLog.Default.WriteLineAndConsole(string.Format(
+                        "[ColonyFramework] Mission {0}: deflected around obstacle {1} at ({2:F0}, {3:F0}, {4:F0}), resumed heading",
+                        m.Id, robstacle, rvia.X, rvia.Y, rvia.Z));
+                    return;
+                }
                 Narrate(m, "return", coreStandoff);
                 string fail = LegOk(rdist, ReturnTimeoutSecs, "return");
                 if (fail != null) RetryOrFail(colony, m, deposit, grid, fail);

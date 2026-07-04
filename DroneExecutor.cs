@@ -15,6 +15,7 @@ namespace ColonyFramework
         private readonly Dictionary<long, WelderController> _welders = new Dictionary<long, WelderController>();
         private readonly Dictionary<long, SurveyController> _surveys = new Dictionary<long, SurveyController>();
         private readonly Dictionary<long, ParkController> _parkers = new Dictionary<long, ParkController>(); // by ASSET id
+        private readonly ConnectorReservations _cons = new ConnectorReservations(); // fleet connector traffic control
         private readonly BoreController _bore = new BoreController(); // for ReleaseControls only
         private readonly List<long> _stale = new List<long>();
 
@@ -38,12 +39,12 @@ namespace ColonyFramework
                     var deposit = colony.Deposits.GetById(m.TargetDepositId);
                     if (deposit == null) continue;
                     active.Add(m.Id);
-                    GetController(m.Id).Advance(colony, m, deposit, grid);
+                    GetController(m.Id).Advance(colony, m, deposit, grid, _cons);
                 }
                 else if (m.Type == MissionType.Weld)
                 {
                     activeWeld.Add(m.Id);
-                    GetWelder(m.Id).Advance(colony, m, grid);
+                    GetWelder(m.Id).Advance(colony, m, grid, _cons);
                 }
                 else if (m.Type == MissionType.Survey)
                 {
@@ -88,7 +89,7 @@ namespace ColonyFramework
                 _stale.Remove(a.EntityId);
                 ParkController p;
                 if (!_parkers.TryGetValue(a.EntityId, out p)) { p = new ParkController(); _parkers[a.EntityId] = p; }
-                p.Tick(colony, a, grid);
+                p.Tick(colony, a, grid, _cons);
             }
             for (int i = 0; i < _stale.Count; i++) _parkers.Remove(_stale[i]);
         }

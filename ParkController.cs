@@ -39,8 +39,11 @@ namespace ColonyFramework
         private Vector3D _spot, _hoverPoint;
         private DateTime _legStart, _touchStart, _retryAt, _lastReroute, _lastLog;
 
-        public void Tick(Colony colony, AssetRecord asset, IMyCubeGrid grid)
+        private ConnectorReservations _cons;
+
+        public void Tick(Colony colony, AssetRecord asset, IMyCubeGrid grid, ConnectorReservations cons)
         {
+            _cons = cons;
             if (DateTime.UtcNow < _retryAt) return; // cooling down after a failed attempt
 
             var rc = DroneUtil.FindRc(grid);
@@ -88,7 +91,10 @@ namespace ColonyFramework
                 return;
             }
 
-            if (droneCon != null && DroneUtil.FindFreeConnectorOnGroup(core.CubeGrid, pos) != null)
+            bool connectorAvailable = _cons != null
+                ? _cons.AnyFree(core.CubeGrid, pos)
+                : DroneUtil.FindFreeConnectorOnGroup(core.CubeGrid, pos) != null;
+            if (droneCon != null && connectorAvailable)
             {
                 DroneUtil.PrepareForFlight(grid);
                 _dock.Reset();
@@ -134,7 +140,7 @@ namespace ColonyFramework
 
         private void TickDock(AssetRecord asset, IMyCubeGrid grid, IMyCubeBlock core, IMyShipConnector droneCon)
         {
-            string r = _dock.Tick(grid, _nav, droneCon, core);
+            string r = _dock.Tick(grid, _nav, droneCon, core, _cons);
             if (r == DockMachine.Connected) { Nap(grid, asset, true); return; }
             if (r != null && r.StartsWith("fail:"))
             {

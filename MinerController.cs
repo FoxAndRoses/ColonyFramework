@@ -33,6 +33,9 @@ namespace ColonyFramework
         private const int DockUnload   = 4; // locked: transfer cargo into the base, then complete
         private const int DockRecover  = 5; // a stage failed: fly back to the core standoff, then retry the dock
         private const int DockCharge   = 6; // locked: recharge to the draw-derived target, then release and re-dispatch
+        private const int DockWaiting  = 7; // all connectors busy: hold at standoff, re-ask every few seconds
+        private const double DockWaitRetrySecs = 10.0;  // how often a waiting drone re-asks for a connector
+        private const double DockWaitCeilingSecs = 600; // waited this long → complete near base (old fallback)
 
         private const int BoreReposition = 0;
         private const int BoreDescend    = 1;
@@ -171,6 +174,7 @@ namespace ColonyFramework
         private DateTime _dockStart;
         private DateTime _bumpStart;  // when the reverse first pressed centered against the connector (for bump-fail detection)
         private DateTime _lastLockTry; // last time we attempted droneCon.Connect() (throttle, not every tick)
+        private DateTime _dockWaitStart, _lastDockRetry; // DockWaiting: hold clock + re-ask throttle
         private bool _dockCentering;  // hysteresis: true while sliding onto the axis, false while backing in
         private double _requiredChargePct = 0.5; // recharge target derived at commissioning from the power self-test
         private double _chargeRefPct;  // last charge level that counted as progress (stall detection)
@@ -201,8 +205,11 @@ namespace ColonyFramework
         private double _yieldRefAmt;   // target-ore amount in cargo at that point (yield-stall detection)
         private bool _depositExhausted;// true once the whole + is mined out → deplete (else release for another pass)
 
-        public void Advance(Colony colony, Mission m, DepositRecord deposit, IMyCubeGrid grid)
+        private ConnectorReservations _cons; // fleet connector traffic control (set each tick by the executor)
+
+        public void Advance(Colony colony, Mission m, DepositRecord deposit, IMyCubeGrid grid, ConnectorReservations cons)
         {
+            _cons = cons;
             if (!_started) { _started = true; OnResume(colony, m, deposit, grid); }
 
             // Awareness before execution: refresh the drone's self-knowledge once per tick. No phase
@@ -967,13 +974,33 @@ namespace ColonyFramework
         {
             var coreBlock = MyAPIGateway.Entities.GetEntityById(colony.State.CoreEntityId) as IMyCubeBlock;
             IMyCubeGrid coreGrid = coreBlock != null ? coreBlock.CubeGrid : null;
-            var baseCon = coreGrid != null ? DroneUtil.FindFreeConnectorOnGroup(coreGrid, pos) : null;
             var droneCon = DroneUtil.FindConnector(grid);
-            if (baseCon == null || droneCon == null)
+            if (coreGrid == null || droneCon == null)
             {
                 MyLog.Default.WriteLineAndConsole(string.Format(
-                    "[ColonyFramework] Mission {0}: no connector available, completing at standoff", m.Id));
+                    "[ColonyFramework] Mission {0}: no core/connector, completing at standoff", m.Id));
                 CompleteMission(colony, m, grid);
+                return;
+            }
+            // RESERVED acquisition: with several drones returning at once, each gets a distinct
+            // connector. None free right now → hold at the standoff and keep asking (DockWaiting).
+            var baseCon = _cons != null ? _cons.Acquire(coreGrid, pos, grid.EntityId)
+                                        : DroneUtil.FindFreeConnectorOnGroup(coreGrid, pos);
+            if (baseCon == null)
+            {
+                bool alreadyWaiting = m.Phase == PhaseDock && _dockSub == DockWaiting;
+                if (!alreadyWaiting)
+                {
+                    _dockWaitStart = DateTime.UtcNow; // ceiling clock starts once, not per retry
+                    if (!MyAPIGateway.Utilities.IsDedicated)
+                        MyAPIGateway.Utilities.ShowMessage("Colony", string.Format(
+                            "'{0}' waiting for a free docking connector", grid.DisplayName));
+                    MyLog.Default.WriteLineAndConsole(string.Format(
+                        "[ColonyFramework] Mission {0}: all connectors busy — holding at standoff", m.Id));
+                }
+                m.Phase = PhaseDock;
+                _dockSub = DockWaiting;
+                _lastDockRetry = DateTime.UtcNow;
                 return;
             }
 
@@ -1060,6 +1087,7 @@ namespace ColonyFramework
         private void CompleteMission(Colony colony, Mission m, IMyCubeGrid grid)
         {
             _bore.Release(grid);
+            if (_cons != null && grid != null) _cons.Release(grid.EntityId);
             DroneUtil.SetBatteriesRecharge(grid, false); // never leave Recharge leaked into idle
             var rc = DroneUtil.FindRc(grid);
             if (rc != null) { rc.SetAutoPilotEnabled(false); rc.DampenersOverride = true; } // stop autopilot, restore dampeners
@@ -1079,6 +1107,27 @@ namespace ColonyFramework
         // All distances use the DRONE CONNECTOR position (dPos), not the RC/grid centre.
         private void TickDock(Colony colony, Mission m, DepositRecord deposit, IMyCubeGrid grid)
         {
+            // Waiting for a connector: hold at the standoff (dampers), re-ask every few seconds.
+            // Legitimate queueing — the dock timeout does not run here; a long ceiling still bails out.
+            if (_dockSub == DockWaiting)
+            {
+                var rcw = DroneUtil.FindRc(grid);
+                if (rcw != null) { rcw.SetAutoPilotEnabled(false); if (!rcw.DampenersOverride) rcw.DampenersOverride = true; }
+                if ((DateTime.UtcNow - _dockWaitStart).TotalSeconds > DockWaitCeilingSecs)
+                {
+                    MyLog.Default.WriteLineAndConsole(string.Format(
+                        "[ColonyFramework] Mission {0}: waited {1:F0}s for a connector — completing at standoff", m.Id, DockWaitCeilingSecs));
+                    CompleteMission(colony, m, grid);
+                    return;
+                }
+                if ((DateTime.UtcNow - _lastDockRetry).TotalSeconds >= DockWaitRetrySecs)
+                {
+                    _lastDockRetry = DateTime.UtcNow;
+                    BeginDock(colony, m, grid, grid.GetPosition()); // re-acquire; falls back into waiting if still none
+                }
+                return;
+            }
+
             var baseCon = MyAPIGateway.Entities.GetEntityById(_dockConnectorId) as IMyShipConnector;
             var droneCon = DroneUtil.FindConnector(grid);
             if (baseCon == null || droneCon == null) { CompleteMission(colony, m, grid); return; }
@@ -1285,6 +1334,7 @@ namespace ColonyFramework
         // standoff, then restart the dock — up to MaxRetries, after which announce the error and fail.
         private void DockFallback(Colony colony, Mission m, IMyCubeGrid grid, string reason)
         {
+            if (_cons != null && grid != null) _cons.Release(grid.EntityId); // fresh connector pick on the retry
             _retries++;
             if (_retries > MaxRetries)
             {
@@ -1307,6 +1357,7 @@ namespace ColonyFramework
             _bore.Release(grid);
             var rc = DroneUtil.FindRc(grid);
             if (rc != null) rc.DampenersOverride = true; // locked to base; dampers on
+            if (_cons != null) _cons.Release(grid.EntityId); // locked on — the connector is ours, free the reservation
             _dockSub = DockUnload;
             _unloadStart = DateTime.UtcNow;
             // Routine dock/unload is log-only — chat is reserved for things the player must act on.
@@ -1416,6 +1467,7 @@ namespace ColonyFramework
             if (grid != null)
             {
                 _bore.Release(grid);
+                if (_cons != null) _cons.Release(grid.EntityId);
                 DroneUtil.SetDrills(grid, false);
                 DroneUtil.SetBatteriesRecharge(grid, false); // never leave Recharge leaked into idle
                 var rc = DroneUtil.FindRc(grid);

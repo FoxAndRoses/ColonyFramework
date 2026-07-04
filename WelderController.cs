@@ -89,9 +89,14 @@ namespace ColonyFramework
         private readonly BlueprintStager _stager = new BlueprintStager(); // shipyard build order (frame -> internals -> closure)
         private int _announcedStage = -1;
 
+        private ConnectorReservations _cons; // fleet connector traffic control (set each tick)
+        private DateTime _dockWaitStart, _lastDockWaitRetry; // hold pattern when all connectors are busy
+        private bool _dockWaiting;
+
         // ── Entry point (called at ~6 Hz by DroneExecutor) ──────────────────────────────────────────
-        public void Advance(Colony colony, Mission m, IMyCubeGrid grid)
+        public void Advance(Colony colony, Mission m, IMyCubeGrid grid, ConnectorReservations cons)
         {
+            _cons = cons;
             var rc = DroneUtil.FindRc(grid);
             if (rc == null) { Fail(colony, m, grid, "no remote control"); return; }
             _nav.Refresh(grid, rc, DroneUtil.FindConnector(grid));
@@ -162,9 +167,22 @@ namespace ColonyFramework
 
             if (!_loading)
             {
-                string r = _dock.Tick(grid, _nav, droneCon, core);
-                if (r == DockMachine.Connected) { EnterLoading(grid); return; }
+                string r = _dock.Tick(grid, _nav, droneCon, core, _cons);
+                if (r == DockMachine.Connected) { _dockWaiting = false; EnterLoading(grid); return; }
+                if (r == "fail:no free base connector")
+                {
+                    // Legitimate queueing, not a failure: hold on dampers and re-ask periodically.
+                    if (!_dockWaiting) { _dockWaiting = true; _dockWaitStart = DateTime.UtcNow; Log(m, "all connectors busy — holding for a free one"); }
+                    var rcw = DroneUtil.FindRc(grid);
+                    if (rcw != null) { rcw.SetAutoPilotEnabled(false); if (!rcw.DampenersOverride) rcw.DampenersOverride = true; }
+                    if ((DateTime.UtcNow - _dockWaitStart).TotalSeconds > 600)
+                    { _dockWaiting = false; RetryOrFail(colony, m, grid, "no connector freed up in 10 min"); return; }
+                    if ((DateTime.UtcNow - _lastDockWaitRetry).TotalSeconds >= 10)
+                    { _lastDockWaitRetry = DateTime.UtcNow; _dock.Reset(); } // fresh acquisition attempt
+                    return;
+                }
                 if (r != null && r.StartsWith("fail:")) { RetryOrFail(colony, m, grid, r.Substring(5)); return; }
+                _dockWaiting = false;
                 return;
             }
 
@@ -673,6 +691,7 @@ namespace ColonyFramework
         private void Cleanup(IMyCubeGrid grid)
         {
             if (grid == null) return;
+            if (_cons != null) _cons.Release(grid.EntityId);
             DroneUtil.SetWelders(grid, false);
             DroneUtil.SetBatteriesRecharge(grid, false); // never leave Recharge leaked into idle
             _fly.Release(grid);

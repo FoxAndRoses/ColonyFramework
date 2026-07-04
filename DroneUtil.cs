@@ -43,9 +43,10 @@ namespace ColonyFramework
             return cons.Count > 0 ? cons[0] : null;
         }
 
-        // Nearest free (not Connected) connector across the physical grid group of 'anyGridInGroup' —
-        // used to find an open base connector on the colony-core's structure.
-        public static IMyShipConnector FindFreeConnectorOnGroup(IMyCubeGrid anyGridInGroup, Vector3D nearTo)
+        // Nearest free (not Connected, not excluded) connector across the physical grid group of
+        // 'anyGridInGroup' — an open base connector. 'exclude' carries other drones' reservations.
+        public static IMyShipConnector FindFreeConnectorOnGroup(IMyCubeGrid anyGridInGroup, Vector3D nearTo,
+                                                                HashSet<long> exclude = null)
         {
             var grids = new List<IMyCubeGrid>();
             var group = anyGridInGroup.GetGridGroup(GridLinkTypeEnum.Physical);
@@ -64,6 +65,7 @@ namespace ColonyFramework
                 for (int i = 0; i < cons.Count; i++)
                 {
                     if (cons[i].Status == MyShipConnectorStatus.Connected) continue;
+                    if (exclude != null && exclude.Contains(cons[i].EntityId)) continue;
                     double sq = Vector3D.DistanceSquared(cons[i].GetPosition(), nearTo);
                     if (sq < bestSq) { bestSq = sq; best = cons[i]; }
                 }

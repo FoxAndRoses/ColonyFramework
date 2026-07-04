@@ -46,16 +46,28 @@ namespace ColonyFramework
             _bumpStart = default(DateTime);
         }
 
-        public string Tick(IMyCubeGrid grid, NavState nav, IMyShipConnector droneCon, IMyCubeBlock core)
+        public string Tick(IMyCubeGrid grid, NavState nav, IMyShipConnector droneCon, IMyCubeBlock core,
+                           ConnectorReservations cons = null)
         {
             if (droneCon == null || core == null) return "fail:connector/core lost";
-            if (droneCon.Status == MyShipConnectorStatus.Connected) { _fly.Release(grid); return Connected; }
-            if ((DateTime.UtcNow - _start).TotalSeconds > TimeoutSecs) return "fail:dock timeout";
+            if (droneCon.Status == MyShipConnectorStatus.Connected)
+            {
+                if (cons != null) cons.Release(grid.EntityId); // locked — the reservation served its purpose
+                _fly.Release(grid);
+                return Connected;
+            }
+            if ((DateTime.UtcNow - _start).TotalSeconds > TimeoutSecs)
+            {
+                if (cons != null) cons.Release(grid.EntityId);
+                return "fail:dock timeout";
+            }
 
             var baseCon = MyAPIGateway.Entities.GetEntityById(_baseConId) as IMyShipConnector;
             if (baseCon == null)
             {
-                baseCon = DroneUtil.FindFreeConnectorOnGroup(core.CubeGrid, grid.GetPosition());
+                baseCon = cons != null
+                    ? cons.Acquire(core.CubeGrid, grid.GetPosition(), grid.EntityId)
+                    : DroneUtil.FindFreeConnectorOnGroup(core.CubeGrid, grid.GetPosition());
                 if (baseCon == null) return "fail:no free base connector";
                 _baseConId = baseCon.EntityId;
                 Vector3D up0 = nav.Valid ? nav.GravityUp : Vector3D.Up;
@@ -153,12 +165,13 @@ namespace ColonyFramework
                     {
                         if (_bumpStart == default(DateTime)) _bumpStart = DateTime.UtcNow;
                         else if ((DateTime.UtcNow - _bumpStart).TotalSeconds > BumpFailSecs)
-                            return "fail:dock bump failed";
+                        { if (cons != null) cons.Release(grid.EntityId); return "fail:dock bump failed"; }
                     }
                     else _bumpStart = default(DateTime);
                 }
                 if (dist < _minDist) _minDist = dist;
-                if (dist > _minDist + ReverseOvershoot) return "fail:dock reverse overshoot";
+                if (dist > _minDist + ReverseOvershoot)
+                { if (cons != null) cons.Release(grid.EntityId); return "fail:dock reverse overshoot"; }
             }
             return null;
         }

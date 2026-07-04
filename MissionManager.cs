@@ -56,10 +56,12 @@ namespace ColonyFramework
             return created;
         }
 
-        // One Weld mission per projector: the welder drone builds the projected blueprint. Created when
-        // production sees an active projection with remaining blocks; no-op while one is already active.
-        public bool EnsureWeldMission(long projectorEntityId, long tick)
+        // Up to 'allowed' concurrent Weld missions per projector (multi-welder: the count scales with
+        // remaining work; the WeldCoordinator's bubbles keep the drones apart on the hull). Returns
+        // how many new missions were created this call.
+        public int EnsureWeldMissions(long projectorEntityId, long tick, int allowed)
         {
+            int active = 0;
             for (int i = 0; i < _state.Missions.Count; i++)
             {
                 var m = _state.Missions[i];
@@ -67,19 +69,23 @@ namespace ColonyFramework
                     (m.Status == MissionStatus.PendingAssignment ||
                      m.Status == MissionStatus.Assigned ||
                      m.Status == MissionStatus.InProgress))
-                    return false;
+                    active++;
             }
-            _state.Missions.Add(new Mission
+            int created = 0;
+            for (; active < allowed; active++, created++)
             {
-                Id = _state.NextMissionId++,
-                Type = MissionType.Weld,
-                TargetDepositId = 0,
-                TargetEntityId = projectorEntityId,
-                AssignedAssetId = 0,
-                Status = MissionStatus.PendingAssignment,
-                CreatedTick = tick
-            });
-            return true;
+                _state.Missions.Add(new Mission
+                {
+                    Id = _state.NextMissionId++,
+                    Type = MissionType.Weld,
+                    TargetDepositId = 0,
+                    TargetEntityId = projectorEntityId,
+                    AssignedAssetId = 0,
+                    Status = MissionStatus.PendingAssignment,
+                    CreatedTick = tick
+                });
+            }
+            return created;
         }
 
         // One Survey mission at a time per colony: a scout flies the next ring segment scanning for ore

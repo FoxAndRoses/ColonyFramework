@@ -44,6 +44,8 @@ namespace ColonyFramework
 
         private const double ReadyDelaySecs   = 15.0; // hold "can build" this long before queuing (user's 15s)
         private const double ChatThrottleSecs = 60.0; // don't repeat the shortage chat more often than this
+        private const int MinBlocksPerWelder  = 40;   // one welder slot per this many remaining blocks
+        private const int MaxWeldersPerProjection = 3;
 
         public ProductionService()
         {
@@ -64,18 +66,22 @@ namespace ColonyFramework
             if (!status.Projecting) { _state.Remove(colony.OwnerKey); return; }
             var st = GetState(colony.OwnerKey);
 
-            // A projecting blueprint with blocks left gets a Weld mission (one per projector). Welding
-            // runs in PARALLEL with component production — CanBuild + cargo gate what's actually weldable.
+            // A projecting blueprint with blocks left gets Weld missions — one welder per
+            // MinBlocksPerWelder (~40) remaining blocks, capped at 3, so a big print gets a crew from
+            // the start and a near-done one doesn't hog drones. Welding runs in PARALLEL with
+            // component production — CanBuild + cargo gate what's actually weldable.
             var projectors = CollectGroup<IMyProjector>(grid);
             long nowTick = MyAPIGateway.Session.GameDateTime.Ticks;
             for (int i = 0; i < projectors.Count; i++)
             {
                 var p = projectors[i];
                 if (p == null || !p.IsProjecting || p.RemainingBlocks <= 0) continue;
-                if (colony.Missions.EnsureWeldMission(p.EntityId, nowTick))
+                int allowed = Math.Max(1, Math.Min(MaxWeldersPerProjection, p.RemainingBlocks / MinBlocksPerWelder));
+                int made = colony.Missions.EnsureWeldMissions(p.EntityId, nowTick, allowed);
+                if (made > 0)
                     MyLog.Default.WriteLineAndConsole(string.Format(
-                        "[ColonyFramework] production: weld mission created for projector {0} ({1} blocks remaining)",
-                        p.EntityId, p.RemainingBlocks));
+                        "[ColonyFramework] production: {0} weld mission(s) created for projector {1} ({2} blocks remaining, {3} slots)",
+                        made, p.EntityId, p.RemainingBlocks, allowed));
             }
 
             if (status.MissingComponents.Count == 0) { st.ReadySince = default(DateTime); return; } // nothing to make

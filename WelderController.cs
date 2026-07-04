@@ -90,13 +90,19 @@ namespace ColonyFramework
         private int _announcedStage = -1;
 
         private ConnectorReservations _cons; // fleet connector traffic control (set each tick)
+        private WeldCoordinator _coord;      // multi-welder block claims + spacing bubbles (set each tick)
         private DateTime _dockWaitStart, _lastDockWaitRetry; // hold pattern when all connectors are busy
         private bool _dockWaiting;
 
         // ── Entry point (called at ~6 Hz by DroneExecutor) ──────────────────────────────────────────
-        public void Advance(Colony colony, Mission m, IMyCubeGrid grid, ConnectorReservations cons)
+        private long _missionId;
+
+        public void Advance(Colony colony, Mission m, IMyCubeGrid grid, ConnectorReservations cons, WeldCoordinator coord)
         {
             _cons = cons;
+            _coord = coord;
+            _missionId = m.Id;
+            if (coord != null) coord.UpdatePresence(m.Id, grid.GetPosition());
             var rc = DroneUtil.FindRc(grid);
             if (rc == null) { Fail(colony, m, grid, "no remote control"); return; }
             _nav.Refresh(grid, rc, DroneUtil.FindConnector(grid));
@@ -333,6 +339,9 @@ namespace ColonyFramework
                 if (_deferred.Contains(b.Position)) continue;
                 if (projector.CanBuild(b, true) != BuildCheckResult.OK) continue;
                 Vector3D w = projected.GridIntegerToWorld(b.Position);
+                // Multi-welder bubble: stay off other welders' claimed blocks and away from the
+                // drones themselves — the fleet spreads across different patches of the hull.
+                if (_coord != null && _coord.NearOthers(m.Id, w, WeldCoordinator.WelderBubble)) continue;
                 int stage = _stager.StageOf(b);
                 double alt = Vector3D.Dot(w, up);
                 double sq = Vector3D.DistanceSquared(w, pos);
@@ -373,6 +382,8 @@ namespace ColonyFramework
 
             _targetCell = best.Position;
             _targetWorld = projected.GridIntegerToWorld(best.Position);
+            if (_coord != null && !_coord.TryClaim(m.Id, projector.EntityId, best.Position, _targetWorld))
+                return; // another welder claimed it between checks — re-select next pass
             // Radial approach: from the construction's volume center THROUGH the block, out to standoff.
             // The radial's elevation is floored at horizontal — nothing is ever approached from below —
             // and the point is clamped above terrain, so a ground-level block gets a level approach.
@@ -469,6 +480,7 @@ namespace ColonyFramework
 
             // Done? The projection no longer contains the cell once the block is placed; the welder
             // (still running, still in range) then welds it up. Give it a beat past placement.
+            if (_coord != null) _coord.TryClaim(m.Id, projector.EntityId, _targetCell, _targetWorld); // keep the claim fresh
             bool placed = projected == null || projected.GetCubeBlock(_targetCell) == null;
             if (placed)
             {
@@ -513,6 +525,7 @@ namespace ColonyFramework
         private void DeferTarget(string why)
         {
             if (_hasTarget) _deferred.Add(_targetCell);
+            if (_coord != null) _coord.ReleaseClaim(_missionId); // free the cell — another welder's angle may work
             _hasTarget = false;
             _workSub = WorkSelect;
         }
@@ -692,6 +705,7 @@ namespace ColonyFramework
         {
             if (grid == null) return;
             if (_cons != null) _cons.Release(grid.EntityId);
+            if (_coord != null) _coord.ReleaseClaim(_missionId);
             DroneUtil.SetWelders(grid, false);
             DroneUtil.SetBatteriesRecharge(grid, false); // never leave Recharge leaked into idle
             _fly.Release(grid);

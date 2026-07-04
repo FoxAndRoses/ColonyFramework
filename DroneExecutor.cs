@@ -16,6 +16,7 @@ namespace ColonyFramework
         private readonly Dictionary<long, SurveyController> _surveys = new Dictionary<long, SurveyController>();
         private readonly Dictionary<long, ParkController> _parkers = new Dictionary<long, ParkController>(); // by ASSET id
         private readonly ConnectorReservations _cons = new ConnectorReservations(); // fleet connector traffic control
+        private readonly WeldCoordinator _weldCoord = new WeldCoordinator(); // multi-welder block claims + bubbles
         private readonly BoreController _bore = new BoreController(); // for ReleaseControls only
         private readonly List<long> _stale = new List<long>();
 
@@ -44,7 +45,7 @@ namespace ColonyFramework
                 else if (m.Type == MissionType.Weld)
                 {
                     activeWeld.Add(m.Id);
-                    GetWelder(m.Id).Advance(colony, m, grid, _cons);
+                    GetWelder(m.Id).Advance(colony, m, grid, _cons, _weldCoord);
                 }
                 else if (m.Type == MissionType.Survey)
                 {

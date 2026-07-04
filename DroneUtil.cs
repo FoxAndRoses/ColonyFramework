@@ -246,6 +246,38 @@ namespace ColonyFramework
             return found ? min : 1.0; // no batteries = external power, don't recall
         }
 
+        // Base power picture across the whole physical group: battery stored/capacity (MWh) and
+        // current battery + reactor output (MW). For the status line, LCD dashboard, and warnings.
+        public static void GroupPower(IMyCubeGrid anyGridInGroup, out double storedMWh, out double capMWh,
+                                      out double batteryOutMW, out double reactorOutMW)
+        {
+            storedMWh = capMWh = batteryOutMW = reactorOutMW = 0;
+            var grids = new List<IMyCubeGrid>();
+            var group = anyGridInGroup.GetGridGroup(GridLinkTypeEnum.Physical);
+            if (group != null) group.GetGrids(grids);
+            if (grids.Count == 0) grids.Add(anyGridInGroup);
+
+            var bats = new List<IMyBatteryBlock>();
+            var reactors = new List<IMyReactor>();
+            for (int g = 0; g < grids.Count; g++)
+            {
+                var ts = MyAPIGateway.TerminalActionsHelper.GetTerminalSystemForGrid(grids[g]);
+                if (ts == null) continue;
+                bats.Clear();
+                ts.GetBlocksOfType(bats);
+                for (int i = 0; i < bats.Count; i++)
+                {
+                    storedMWh += bats[i].CurrentStoredPower;
+                    capMWh += bats[i].MaxStoredPower;
+                    batteryOutMW += bats[i].CurrentOutput;
+                }
+                reactors.Clear();
+                ts.GetBlocksOfType(reactors);
+                for (int i = 0; i < reactors.Count; i++)
+                    reactorOutMW += reactors[i].CurrentOutput;
+            }
+        }
+
         // Sums battery stored energy (MWh) and current output (MW); returns battery count.
         public static int SumBatteryPower(IMyCubeGrid grid, out double stored, out double output)
         {

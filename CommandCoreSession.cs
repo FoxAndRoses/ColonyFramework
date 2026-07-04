@@ -35,6 +35,7 @@ namespace ColonyFramework
         private readonly DispatchService _dispatch = new DispatchService();
         private readonly ProductionService _production = new ProductionService();
         private readonly GpsService _gps = new GpsService();
+        private readonly LcdService _lcd = new LcdService();
 
         private int _tick;
         private long _scanTick;
@@ -131,6 +132,8 @@ namespace ColonyFramework
                     catch (Exception e) { MyLog.Default.WriteLineAndConsole("[ColonyFramework] production error: " + e.Message); }
                     try { _gps.Sync(colony); } // HUD markers for active missions (same slow cadence)
                     catch (Exception e) { MyLog.Default.WriteLineAndConsole("[ColonyFramework] gps error: " + e.Message); }
+                    try { _lcd.Tick(colony); } // "[Colony]" LCD dashboards + low-power warning
+                    catch (Exception e) { MyLog.Default.WriteLineAndConsole("[ColonyFramework] lcd error: " + e.Message); }
                 }
             }
 

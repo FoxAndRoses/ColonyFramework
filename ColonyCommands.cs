@@ -25,7 +25,8 @@ namespace ColonyFramework
             "/colony assets — drone roster",
             "/colony resources — ore / ingot / component stock",
             "/colony build — projector blueprint vs stock (missing parts)",
-            "/colony status — live mission/drone status + survey coverage",
+            "/colony status — live mission/drone status, power, survey coverage",
+            "/colony name <name> — rename the colony (LCDs/dashboard use it)",
             "/colony dispatch — enable autonomous mining",
             "/colony abort — stop all missions",
             "/colony recall — bring drones home",
@@ -91,6 +92,17 @@ namespace ColonyFramework
             if (text == "/colony status")
             {
                 HandleStatus(colony);
+                return;
+            }
+
+            if (text.StartsWith("/colony name "))
+            {
+                // Use the ORIGINAL message for the name — 'text' is lowercased for dispatch.
+                string newName = messageText.Trim().Substring("/colony name ".Length).Trim();
+                if (newName.Length == 0) { MyAPIGateway.Utilities.ShowMessage("Colony", "usage: /colony name <name>"); return; }
+                if (newName.Length > 32) newName = newName.Substring(0, 32);
+                colony.State.Name = newName;
+                MyAPIGateway.Utilities.ShowMessage("Colony", "colony renamed to '" + newName + "'");
                 return;
             }
 
@@ -288,6 +300,17 @@ namespace ColonyFramework
                 MyAPIGateway.Utilities.ShowMessage("Colony", string.Format(
                     "survey coverage: {0:F0} m ring at {1:F0}°; deposits known: {2}",
                     colony.State.SurveyedRadius, colony.State.SurveyedAngleDeg, colony.Deposits.Deposits.Count));
+
+            var coreForPower = MyAPIGateway.Entities.GetEntityById(colony.State.CoreEntityId) as IMyCubeBlock;
+            if (coreForPower != null)
+            {
+                double stored, cap, batOut, reactorOut;
+                DroneUtil.GroupPower(coreForPower.CubeGrid, out stored, out cap, out batOut, out reactorOut);
+                MyAPIGateway.Utilities.ShowMessage("Colony", string.Format(
+                    "base power: {0:F0}% stored ({1:F1}/{2:F1} MWh){3}",
+                    cap > 0 ? stored / cap * 100.0 : 0, stored, cap,
+                    reactorOut > 0.005 ? string.Format(", reactor {0:F1} MW", reactorOut) : ""));
+            }
         }
 
         // Compare the projector blueprint's component bill-of-materials to current colony stock and report

@@ -44,9 +44,11 @@ namespace ColonyFramework
         // True if the corridor toward 'target' is obstructed; 'via' is the suggested detour waypoint
         // and 'obstacle' names what's in the way (for the caller's log line). terrainClearance overrides
         // the default look-ahead floor (survey legs fly ~50 m AGL and pass a lower floor so routine
-        // low flight isn't read as terrain danger).
+        // low flight isn't read as terrain danger). ignoreEntityId excludes one grid AND its physical
+        // group from grid sensing — the welder's construction site is its DESTINATION, owned by the
+        // orbit rule, not an obstacle for this probe.
         public bool TryGetDetour(NavState nav, IMyCubeGrid self, Vector3D target, out Vector3D via, out string obstacle,
-                                 double terrainClearance = TerrainClearance)
+                                 double terrainClearance = TerrainClearance, long ignoreEntityId = 0)
         {
             via = default(Vector3D);
             obstacle = null;
@@ -93,6 +95,8 @@ namespace ColonyFramework
             }
 
             // ── Layer 2: grid broad-phase — any nearby grid's AABB across the corridor? ─────────────
+            var ignoreGrid = ignoreEntityId != 0
+                ? MyAPIGateway.Entities.GetEntityById(ignoreEntityId) as IMyCubeGrid : null;
             RayD ray = new RayD(pos, dir);
             IMyCubeGrid blocking = null;
             double blockDist = double.MaxValue;
@@ -101,6 +105,7 @@ namespace ColonyFramework
                 var grid = _nearby[i] as IMyCubeGrid;
                 if (grid == null || grid.EntityId == self.EntityId) continue;
                 if (SameGroup(self, grid)) continue; // own docked/attached structure is not an obstacle
+                if (ignoreGrid != null && (grid.EntityId == ignoreEntityId || SameGroup(ignoreGrid, grid))) continue;
 
                 BoundingBoxD box = grid.WorldAABB;
                 box.Inflate(CorridorMargin);
@@ -117,7 +122,7 @@ namespace ColonyFramework
 
             // ── Layer 3: ray fan — only now do we pay for physics raycasts ──────────────────────────
             Vector3D hitPos; Vector3D hitNormal;
-            if (!RayFan(self, pos, dir, corridorLen, nav.GravityUp, out hitPos, out hitNormal))
+            if (!RayFan(self, ignoreGrid, pos, dir, corridorLen, nav.GravityUp, out hitPos, out hitNormal))
             {
                 // AABB says blocked but rays passed (corner clip / conservative box): steer off the
                 // AABB's near-intersect point anyway — cheap and safe.
@@ -136,8 +141,8 @@ namespace ColonyFramework
         }
 
         // 3-ray narrow phase: center + two lateral fan rays. Physics CastRay hits grids (NOT voxels —
-        // terrain is layer 1's job). Ignores hits on self / own physical group.
-        private bool RayFan(IMyCubeGrid self, Vector3D pos, Vector3D dir, double len, Vector3D up,
+        // terrain is layer 1's job). Ignores hits on self / own physical group / the ignored grid.
+        private bool RayFan(IMyCubeGrid self, IMyCubeGrid ignoreGrid, Vector3D pos, Vector3D dir, double len, Vector3D up,
                             out Vector3D hitPos, out Vector3D hitNormal)
         {
             hitPos = default(Vector3D);
@@ -157,6 +162,8 @@ namespace ColonyFramework
                 if (!MyAPIGateway.Physics.CastRay(from, to, out hit) || hit == null) continue;
                 var hitGrid = hit.HitEntity as IMyCubeGrid;
                 if (hitGrid != null && (hitGrid.EntityId == self.EntityId || SameGroup(self, hitGrid))) continue;
+                if (hitGrid != null && ignoreGrid != null
+                    && (hitGrid.EntityId == ignoreGrid.EntityId || SameGroup(ignoreGrid, hitGrid))) continue;
 
                 double d2 = Vector3D.DistanceSquared(pos, hit.Position);
                 if (d2 < best) { best = d2; hitPos = hit.Position; hitNormal = hit.Normal; }

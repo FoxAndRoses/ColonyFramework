@@ -48,6 +48,11 @@ namespace ColonyFramework
         private const double ApproachStandoff  = 15.0;  // m outside the block along the radial for the approach point
         private const double ApproachTol       = 3.0;
         private const double ApproachSpeed     = 6.0;
+        private const double OrbitLegSpeed     = 12.0;  // arc legs around the construction (fluid sweep)
+        private const double WelderMinAgl      = 12.0;  // orbit/standoff points never dip below surface + this
+        private const double ApproachMinAgl    = 4.0;   // approach points may be lower (ground-level blocks) but never in the ground
+        private const double SiteRerouteSecs   = 3.0;   // orbit step / avoidance re-issue cadence at the site
+        private const double ApproachTimeoutSecs = 180.0; // whole approach (incl. orbit) budget before deferring the block
         private const double WeldInSpeed       = 0.8;   // m/s nose-in creep (dampers on)
         private const double WeldReach         = 2.0;   // m past the drone's own radius that counts as "in welder range"
         private const double SettleSpeed       = 0.5;
@@ -75,6 +80,7 @@ namespace ColonyFramework
         private readonly BoreController _fly = new BoreController();
         private readonly NavState _nav = new NavState();
         private readonly AvoidanceProbe _avoid = new AvoidanceProbe();
+        private readonly OrbitNav _orbit = new OrbitNav(); // fluid around-the-hull navigation at the site
 
         private bool _initialized;
         private int _retries;
@@ -90,6 +96,8 @@ namespace ColonyFramework
         private int _lastRemaining = -1;
         private Vector3I _targetCell; private Vector3D _targetWorld, _approachPoint;
         private bool _hasTarget;
+        private DateTime _lastSiteReroute; // orbit/avoidance re-issue throttle at the site
+        private DateTime _approachStart;   // whole-approach budget (orbit legs reset autopilot, so LegOk can't time this)
         private readonly HashSet<Vector3I> _deferred = new HashSet<Vector3I>();
         private bool _deferredRetried; // one full retry pass over deferred blocks before declaring stuck
         private readonly BlueprintStager _stager = new BlueprintStager(); // shipyard build order (frame -> internals -> closure)
@@ -228,7 +236,8 @@ namespace ColonyFramework
                 var rc = DroneUtil.FindRc(grid);
                 if (rc != null && !rc.DampenersOverride) rc.DampenersOverride = true;
                 Vector3D via; string obstacle;
-                if (_avoid.TryGetDetour(_nav, grid, standoff, out via, out obstacle))
+                if (_avoid.TryGetDetour(_nav, grid, standoff, out via, out obstacle,
+                    40.0, projector.CubeGrid.EntityId)) // destination structure isn't an obstacle
                 {
                     CruiseTo(grid, standoff, CruiseSpeedLimit, "build site", via);
                     Log(m, string.Format("deflected around obstacle {0}, resumed heading", obstacle));
@@ -364,16 +373,21 @@ namespace ColonyFramework
             _targetCell = best.Position;
             _targetWorld = projected.GridIntegerToWorld(best.Position);
             // Radial approach: from the construction's volume center THROUGH the block, out to standoff.
+            // The radial's elevation is floored at horizontal — nothing is ever approached from below —
+            // and the point is clamped above terrain, so a ground-level block gets a level approach.
+            Vector3D up0 = _nav.Valid ? _nav.GravityUp : Vector3D.Up;
             Vector3D center = projected.WorldAABB.Center;
             Vector3D radial = _targetWorld - center;
-            if (radial.LengthSquared() < 1.0) radial = _nav.GravityUp; // block at dead center: come from above
+            double downComp = Vector3D.Dot(radial, up0);
+            if (downComp < 0) radial -= up0 * downComp;      // strip the below-horizon component
+            if (radial.LengthSquared() < 1.0) radial = up0;  // dead-centre / straight-below: come from above
             radial = Vector3D.Normalize(radial);
             double selfRadius = grid.WorldAABB.HalfExtents.Length();
-            _approachPoint = _targetWorld + radial * (selfRadius + ApproachStandoff);
+            _approachPoint = _orbit.ClampAboveTerrain(_targetWorld + radial * (selfRadius + ApproachStandoff), up0, ApproachMinAgl);
             _hasTarget = true;
             _workSub = WorkApproach;
-            CruiseToDirect(grid, _approachPoint, (float)ApproachSpeed, "weld approach");
-            ResetLeg();
+            _approachStart = DateTime.UtcNow;
+            _lastSiteReroute = default(DateTime); // first TickApproach issues the first orbit/direct leg immediately
             Log(m, string.Format("weld: target block at ({0:F0}, {1:F0}, {2:F0}), {3} remaining",
                 _targetWorld.X, _targetWorld.Y, _targetWorld.Z, projector.RemainingBlocks));
         }
@@ -381,11 +395,42 @@ namespace ColonyFramework
         private void TickApproach(Colony colony, Mission m, IMyCubeGrid grid, IMyProjector projector)
         {
             if (!_hasTarget) { _workSub = WorkSelect; return; }
-            double dist = Vector3D.Distance(grid.GetPosition(), _approachPoint);
+            Vector3D pos = grid.GetPosition();
+            Vector3D up = _nav.Valid ? _nav.GravityUp : Vector3D.Up;
+            double dist = Vector3D.Distance(pos, _approachPoint);
+
             if (dist > ApproachTol || _nav.Speed > SettleSpeed)
             {
-                string fail = LegOk(dist, LegTimeoutSecs, "weld approach");
-                if (fail != null) { DeferTarget("approach " + fail); return; }
+                var rcm = DroneUtil.FindRc(grid);
+                if (rcm != null && !rcm.DampenersOverride) rcm.DampenersOverride = true;
+
+                // Whole-approach budget (orbit legs re-issue autopilot, so a per-leg watchdog can't
+                // time this): too long overall → this block is awkward to reach right now, defer it.
+                if ((DateTime.UtcNow - _approachStart).TotalSeconds > ApproachTimeoutSecs)
+                { DeferTarget("approach timeout"); return; }
+
+                if ((DateTime.UtcNow - _lastSiteReroute).TotalSeconds >= SiteRerouteSecs)
+                {
+                    _lastSiteReroute = DateTime.UtcNow;
+
+                    // Third-party obstacles first (other grids / terrain rises); the construction
+                    // itself is excluded — the orbit rule owns it.
+                    Vector3D via; string obstacle;
+                    if (_avoid.TryGetDetour(_nav, grid, _approachPoint, out via, out obstacle,
+                        8.0, projector.CubeGrid.EntityId))
+                    {
+                        CruiseToDirect(grid, via, (float)OrbitLegSpeed, "avoid detour");
+                        Log(m, string.Format("deflected around obstacle {0}", obstacle));
+                        return;
+                    }
+
+                    // Orbit-or-direct: slide along the keep-out sphere until line-of-sight to the
+                    // approach point opens, then fly straight at it. Stateless — one step per reroute.
+                    Vector3D wp;
+                    bool direct = _orbit.NextStep(pos, _approachPoint, KeepOut(projector, grid), up, WelderMinAgl, out wp);
+                    CruiseToDirect(grid, wp, (float)(direct ? ApproachSpeed : OrbitLegSpeed),
+                        direct ? "weld approach" : "orbit");
+                }
                 return;
             }
             var rc = DroneUtil.FindRc(grid);
@@ -649,7 +694,17 @@ namespace ColonyFramework
             var projected = projector.ProjectedGrid;
             BoundingBoxD box = projected != null ? projected.WorldAABB : projector.CubeGrid.WorldAABB;
             Vector3D up = _nav.Valid ? _nav.GravityUp : Vector3D.Up;
-            return box.Center + up * (box.HalfExtents.Length() + SiteStandoffUp);
+            return _orbit.ClampAboveTerrain(box.Center + up * (box.HalfExtents.Length() + SiteStandoffUp), up, WelderMinAgl);
+        }
+
+        // The construction's keep-out sphere: projected + real extents, inflated by the drone's own
+        // size — the orbit rule keeps every flight leg outside this; only the final nose-in enters.
+        private BoundingSphereD KeepOut(IMyProjector projector, IMyCubeGrid self)
+        {
+            var projected = projector.ProjectedGrid;
+            BoundingBoxD box = projected != null ? projected.WorldAABB : projector.CubeGrid.WorldAABB;
+            double selfRadius = self.WorldAABB.HalfExtents.Length();
+            return new BoundingSphereD(box.Center, box.HalfExtents.Length() + selfRadius + 4.0);
         }
 
         // Climb-then-cruise (mirrors the miner's EngageCruise, incl. the optional avoidance detour).

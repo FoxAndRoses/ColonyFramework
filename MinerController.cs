@@ -263,6 +263,10 @@ namespace ColonyFramework
             {
                 _commissionStarted = true;
                 _commissionStart = DateTime.UtcNow;
+                // WAKE a power-napped drone (parking disables thrusters/gyros, docked idle recharges)
+                // but do NOT unlock — the load test wants it anchored.
+                DroneUtil.SetBatteriesRecharge(grid, false);
+                DroneUtil.SetThrustersAndGyros(grid, true);
                 // ANCHOR before the load test: a full-thrust spike on a free-sitting drone shoves it
                 // off the pad (seen in testing: fell off the connector, thrashed on the ground).
                 // Re-lock the connector if it's in range, lock any landing gear — only spike if held.

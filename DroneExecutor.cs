@@ -14,6 +14,7 @@ namespace ColonyFramework
         private readonly Dictionary<long, MinerController> _controllers = new Dictionary<long, MinerController>();
         private readonly Dictionary<long, WelderController> _welders = new Dictionary<long, WelderController>();
         private readonly Dictionary<long, SurveyController> _surveys = new Dictionary<long, SurveyController>();
+        private readonly Dictionary<long, ParkController> _parkers = new Dictionary<long, ParkController>(); // by ASSET id
         private readonly BoreController _bore = new BoreController(); // for ReleaseControls only
         private readonly List<long> _stale = new List<long>();
 
@@ -66,6 +67,30 @@ namespace ColonyFramework
             foreach (var key in _surveys.Keys)
                 if (!activeSurvey.Contains(key)) _stale.Add(key);
             for (int i = 0; i < _stale.Count; i++) _surveys.Remove(_stale[i]);
+
+            TickParkers(colony);
+        }
+
+        // Idle drones get parked (dock-recharge or land-nearby + power-nap) instead of hovering
+        // forever. A parker exists only while its asset is Idle; the moment a mission takes the
+        // asset the parker is dropped and PrepareForFlight wakes the drone at commissioning.
+        private void TickParkers(Colony colony)
+        {
+            var assets = colony.Assets.Assets;
+            _stale.Clear();
+            foreach (var key in _parkers.Keys) _stale.Add(key); // assume stale until seen idle below
+            for (int i = 0; i < assets.Count; i++)
+            {
+                var a = assets[i];
+                if (a.Status != AssetStatus.Idle) continue;
+                var grid = MyAPIGateway.Entities.GetEntityById(a.EntityId) as IMyCubeGrid;
+                if (grid == null) continue;
+                _stale.Remove(a.EntityId);
+                ParkController p;
+                if (!_parkers.TryGetValue(a.EntityId, out p)) { p = new ParkController(); _parkers[a.EntityId] = p; }
+                p.Tick(colony, a, grid);
+            }
+            for (int i = 0; i < _stale.Count; i++) _parkers.Remove(_stale[i]);
         }
 
         public void AbortAll(Colony colony)

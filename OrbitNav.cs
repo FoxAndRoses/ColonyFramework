@@ -47,6 +47,19 @@ namespace ColonyFramework
             return false;
         }
 
+        // Pin a point to exactly surface + agl at that spot (landing spots, terrain-hugging waypoints).
+        public Vector3D PinToSurface(Vector3D near, Vector3D up, double agl)
+        {
+            if (_planet == null || (DateTime.UtcNow - _lastPlanetFind).TotalSeconds > 60)
+            {
+                _lastPlanetFind = DateTime.UtcNow;
+                _planet = MyGamePruningStructure.GetClosestPlanet(near);
+            }
+            if (_planet == null) return near;
+            Vector3D surface = _planet.GetClosestSurfacePointGlobal(ref near);
+            return surface + up * agl;
+        }
+
         // Never below the planet surface + minAgl at that spot (no-op with no planet, e.g. space).
         public Vector3D ClampAboveTerrain(Vector3D point, Vector3D up, double minAgl)
         {

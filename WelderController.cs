@@ -33,13 +33,6 @@ namespace ColonyFramework
         private const int WorkWeldIn  = 2;
         private const int WorkBackOut = 3;
 
-        // Dock sub-states (compact port of the miner's PROVEN dock flow — same constants/values)
-        private const int DockApproach = 0;
-        private const int DockShimmy   = 1;
-        private const int DockAlign    = 2;
-        private const int DockReverse  = 3;
-        private const int DockLoading  = 4;
-
         // Flight constants (values proven by the miner)
         private const float  CruiseSpeedLimit  = 70f;
         private const double CruiseAltitudeAgl = 100.0;
@@ -69,29 +62,22 @@ namespace ColonyFramework
         private const double ChargeStallSecs   = 60.0;
         private const double CargoLoadTarget   = 0.60;  // stop loading components at this cargo fill
 
-        // Dock constants (copied from the miner's proven dock)
-        private const double StageFwd = 20.0, ShimmyTop = 25.0, ShimmyDrop = 5.0, ShimmyStep = 8.0, DockClearance = 1.0;
-        private const double DockMoveSpeed = 6.0, DockArriveTol = 3.0, DockAlignDot = 0.98;
-        private const double ReverseSpeed = 1.0, ReverseOvershoot = 5.0, BumpDist = 3.0, BumpFailSecs = 30.0, LockTrySecs = 1.5;
-        private const double DockLateralTol = 0.15, DockCenterEnter = 0.30, CenterGain = 0.6, CenterMinSpeed = 0.05;
-        private const double CrawlSpeedNear = 0.25, CrawlSpeedMid = 1.0, CrawlSpeedFar = 2.0, CrawlMidDist = 5.0, CrawlFarDist = 10.0;
-        private const double DockTimeoutSecs = 180.0;
+        private const double DockMoveSpeed = 6.0; // slow hop used by the transit-recover leg
 
         private readonly BoreController _fly = new BoreController();
         private readonly NavState _nav = new NavState();
         private readonly AvoidanceProbe _avoid = new AvoidanceProbe();
         private readonly OrbitNav _orbit = new OrbitNav(); // fluid around-the-hull navigation at the site
+        private readonly DockMachine _dock = new DockMachine(); // shared proven connector-dock sequence
 
         private bool _initialized;
         private int _retries;
         private int _workSub;
-        private int _dockSub;
+        private bool _loading; // DockLoad phase: false = flying the dock, true = connected and loading
         private bool _returningToResupply; // Return phase ends in DockLoad (resupply) vs mission complete
         private DateTime _legStart, _legProgressTime;
         private double _legMinDist = double.MaxValue;
-        private DateTime _lastLog, _lastSelect, _weldStart, _lastLockTry, _bumpStart, _chargeProgressTime, _lastSiteProgress;
-        private bool _dockCentering;
-        private double _shimmyHeight; private bool _shimmyOut;
+        private DateTime _lastLog, _lastSelect, _weldStart, _chargeProgressTime, _lastSiteProgress;
         private double _chargeRefPct;
         private int _lastRemaining = -1;
         private Vector3I _targetCell; private Vector3D _targetWorld, _approachPoint;
@@ -152,13 +138,11 @@ namespace ColonyFramework
         {
             m.Phase = PhaseDockLoad;
             var droneCon = DroneUtil.FindConnector(grid);
-            _dockSub = (droneCon != null && droneCon.Status == MyShipConnectorStatus.Connected)
-                ? DockLoading : DockApproach;
-            if (_dockSub == DockApproach)
+            _loading = droneCon != null && droneCon.Status == MyShipConnectorStatus.Connected;
+            if (!_loading)
             {
                 DroneUtil.PrepareForFlight(grid); // batteries auto + thrusters on + unlock — autopilot won't do any of it
-                Vector3D standoff;
-                if (TryCoreStandoff(colony, out standoff)) CruiseTo(grid, standoff, (float)DockMoveSpeed, "base standoff", null);
+                _dock.Reset();                    // shared dock machine flies the approach itself
             }
             else
             {
@@ -176,12 +160,11 @@ namespace ColonyFramework
             var core = MyAPIGateway.Entities.GetEntityById(colony.State.CoreEntityId) as IMyCubeBlock;
             if (droneCon == null || core == null) { Fail(colony, m, grid, "connector/core lost"); return; }
 
-            if (_dockSub != DockLoading)
+            if (!_loading)
             {
-                if (droneCon.Status == MyShipConnectorStatus.Connected) { EnterLoading(grid); return; }
-                if ((DateTime.UtcNow - _legStart).TotalSeconds > DockTimeoutSecs)
-                { RetryOrFail(colony, m, grid, "dock timeout"); return; }
-                TickDockMachine(colony, m, grid, droneCon, core);
+                string r = _dock.Tick(grid, _nav, droneCon, core);
+                if (r == DockMachine.Connected) { EnterLoading(grid); return; }
+                if (r != null && r.StartsWith("fail:")) { RetryOrFail(colony, m, grid, r.Substring(5)); return; }
                 return;
             }
 
@@ -212,7 +195,7 @@ namespace ColonyFramework
 
         private void EnterLoading(IMyCubeGrid grid)
         {
-            _dockSub = DockLoading;
+            _loading = true;
             _fly.Release(grid);
             DroneUtil.SetBatteriesRecharge(grid, true);
             _chargeRefPct = DroneUtil.MinBatteryCharge(grid);
@@ -562,132 +545,6 @@ namespace ColonyFramework
             BeginReturn(colony, m, grid, false);
         }
 
-        // ── Compact dock machine (port of the miner's PROVEN approach/shimmy/align/reverse) ─────────
-        private long _dockConnectorId;
-        private void TickDockMachine(Colony colony, Mission m, IMyCubeGrid grid, IMyShipConnector droneCon, IMyCubeBlock core)
-        {
-            var baseCon = MyAPIGateway.Entities.GetEntityById(_dockConnectorId) as IMyShipConnector;
-            if (baseCon == null)
-            {
-                baseCon = DroneUtil.FindFreeConnectorOnGroup(core.CubeGrid, grid.GetPosition());
-                if (baseCon == null) { RetryOrFail(colony, m, grid, "no free base connector"); return; }
-                _dockConnectorId = baseCon.EntityId;
-                Vector3D up0 = _nav.GravityUp;
-                _shimmyHeight = ShimmyTop;
-                _shimmyOut = true;
-                CruiseToDirect(grid, baseCon.GetPosition() + baseCon.WorldMatrix.Forward * StageFwd + up0 * ShimmyTop,
-                    (float)DockMoveSpeed, "dock approach");
-                _dockSub = DockApproach;
-                ResetLeg();
-                return;
-            }
-
-            Vector3D bPos = baseCon.GetPosition();
-            Vector3D bFwd = baseCon.WorldMatrix.Forward;
-            Vector3D dPos = droneCon.GetPosition();
-            Vector3D dFwd = droneCon.WorldMatrix.Forward;
-            Vector3D up = _nav.GravityUp;
-            Vector3D rcPos = grid.GetPosition();
-
-            if (_dockSub == DockApproach)
-            {
-                Vector3D top = bPos + bFwd * StageFwd + up * ShimmyTop;
-                if (Vector3D.Distance(rcPos, top) <= DockArriveTol && _nav.Speed < SettleSpeed)
-                {
-                    _shimmyHeight = ShimmyTop - ShimmyDrop;
-                    _shimmyOut = true;
-                    CruiseToDirect(grid, ShimmyPoint(bPos, bFwd, up), (float)DockMoveSpeed, "shimmy");
-                    _dockSub = DockShimmy;
-                    ResetLeg();
-                }
-                else { string f = LegOk(Vector3D.Distance(rcPos, top), DockTimeoutSecs, "dock approach"); if (f != null) RetryOrFail(colony, m, grid, f); }
-            }
-            else if (_dockSub == DockShimmy)
-            {
-                Vector3D target = ShimmyPoint(bPos, bFwd, up);
-                if (Vector3D.Distance(rcPos, target) <= DockArriveTol && _nav.Speed < SettleSpeed)
-                {
-                    if (_shimmyHeight <= DockClearance + 0.1)
-                    {
-                        var rc = DroneUtil.FindRc(grid);
-                        if (rc != null) rc.SetAutoPilotEnabled(false);
-                        _dockSub = DockAlign;
-                        ResetLeg();
-                    }
-                    else
-                    {
-                        _shimmyHeight = Math.Max(DockClearance, _shimmyHeight - ShimmyDrop);
-                        _shimmyOut = !_shimmyOut;
-                        CruiseToDirect(grid, ShimmyPoint(bPos, bFwd, up), (float)DockMoveSpeed, "shimmy");
-                    }
-                }
-                else { string f = LegOk(Vector3D.Distance(rcPos, target), DockTimeoutSecs, "dock shimmy"); if (f != null) RetryOrFail(colony, m, grid, f); }
-            }
-            else if (_dockSub == DockAlign)
-            {
-                var rc = DroneUtil.FindRc(grid);
-                if (rc != null && !rc.DampenersOverride) rc.DampenersOverride = true;
-                double a = _fly.Face(grid, dFwd, -bFwd);
-                if (a > DockAlignDot && _nav.Speed < SettleSpeed)
-                {
-                    _dockSub = DockReverse;
-                    _bumpStart = default(DateTime);
-                    _dockCentering = false;
-                    ResetLeg();
-                }
-            }
-            else if (_dockSub == DockReverse)
-            {
-                var rc = DroneUtil.FindRc(grid);
-                if (rc != null && !rc.DampenersOverride) rc.DampenersOverride = true;
-                if (droneCon.Status == MyShipConnectorStatus.Connected) { EnterLoading(grid); return; }
-                if (droneCon.Status == MyShipConnectorStatus.Connectable
-                    && (DateTime.UtcNow - _lastLockTry).TotalSeconds > LockTrySecs)
-                {
-                    _lastLockTry = DateTime.UtcNow;
-                    droneCon.Connect();
-                    if (droneCon.Status == MyShipConnectorStatus.Connected) { EnterLoading(grid); return; }
-                }
-                _fly.Face(grid, dFwd, -bFwd);
-
-                Vector3D rel = dPos - bPos;
-                double along = Vector3D.Dot(rel, bFwd);
-                Vector3D offAxis = rel - bFwd * along;
-                double lateral = offAxis.Length();
-                double dist = rel.Length();
-                double inwardSpeed = Vector3D.Dot(_nav.Velocity, -bFwd);
-
-                if (_dockCentering) { if (lateral <= DockLateralTol) _dockCentering = false; }
-                else if (lateral > DockCenterEnter) _dockCentering = true;
-
-                if (_dockCentering)
-                {
-                    double shiftSpeed = Math.Min(CrawlSpeedNear, Math.Max(CenterMinSpeed, lateral * CenterGain));
-                    _fly.ThrustAlong(grid, -offAxis / lateral, shiftSpeed, 1.0f, 0.5f);
-                    _bumpStart = default(DateTime);
-                }
-                else
-                {
-                    double rs = dist > CrawlFarDist ? CrawlSpeedFar : dist > CrawlMidDist ? CrawlSpeedMid : CrawlSpeedNear;
-                    _fly.ThrustAlong(grid, -bFwd, rs, 1.0f);
-                    if (dist <= BumpDist && inwardSpeed < ContactSpeedEps)
-                    {
-                        if (_bumpStart == default(DateTime)) _bumpStart = DateTime.UtcNow;
-                        else if ((DateTime.UtcNow - _bumpStart).TotalSeconds > BumpFailSecs)
-                        { RetryOrFail(colony, m, grid, "dock bump failed"); return; }
-                    }
-                    else _bumpStart = default(DateTime);
-                }
-                if (dist < _legMinDist) _legMinDist = dist;
-                if (dist > _legMinDist + ReverseOvershoot) { RetryOrFail(colony, m, grid, "dock reverse overshoot"); return; }
-            }
-        }
-
-        private Vector3D ShimmyPoint(Vector3D bPos, Vector3D bFwd, Vector3D up)
-        {
-            return bPos + bFwd * (StageFwd + (_shimmyOut ? ShimmyStep : 0.0)) + up * _shimmyHeight;
-        }
-
         // ── Shared flight helpers ────────────────────────────────────────────────────────────────────
         private Vector3D SiteStandoff(IMyProjector projector)
         {
@@ -777,7 +634,7 @@ namespace ColonyFramework
             DroneUtil.SetWelders(grid, false);
             var rc = DroneUtil.FindRc(grid);
             if (rc != null) { rc.SetAutoPilotEnabled(false); rc.DampenersOverride = true; }
-            _dockConnectorId = 0;
+            _dock.Reset(); // fresh dock attempt (new connector pick) on the retry
             switch (m.Phase)
             {
                 case PhaseDockLoad: BeginDockLoad(colony, m, grid); break;

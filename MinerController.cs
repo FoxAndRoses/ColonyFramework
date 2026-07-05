@@ -140,6 +140,7 @@ namespace ColonyFramework
         private const double MaxBoreDepth       = 60.0; // hard per-bore depth cap (safety; replaces the old fixed-depth stop)
         private const double DumpHoldSecs       = 45.0; // max dump time (8s never emptied a full cargo — "hold timeout" loops)
         private const double EjectOffset        = 15.0; // m sideways from the shaft before opening the connector
+        private const double ResumeCargoFrac    = 0.35; // dump until cargo is below this — working room beats a perfect empty
         private const double BoreTimeoutSeconds = 600;  // ceiling = 10-min runtime floor
         private const double AlignmentMinDot    = 0.7;
         private const double StuckDistance      = 1.0;
@@ -468,6 +469,7 @@ namespace ColonyFramework
             if (grid == null) return;
             _bore.Release(grid);
             DroneUtil.SetDrills(grid, false);
+            DroneUtil.SetThrowOut(grid, false); // never let a dump leak into recovery/dock (it would throw ORE)
             DroneUtil.SetBatteriesRecharge(grid, false);  // a recovering hover NEEDS battery output
             DroneUtil.SetThrustersAndGyros(grid, true);
             var rc = DroneUtil.FindRc(grid);
@@ -622,6 +624,7 @@ namespace ColonyFramework
                 Vector3D horiz = toT - downDir * Vector3D.Dot(toT, downDir);
                 if (horiz.Length() < RepoTolerance)
                 {
+                    DroneUtil.SetThrowOut(grid, false); // never eject inside the shaft (post-dump slide-back leaves it on)
                     _boreSub = BoreDescend;
                     _subStart = DateTime.UtcNow;
                 }
@@ -784,6 +787,11 @@ namespace ColonyFramework
                     {
                         _ejectMovedOut = true;
                         _ejectHoldStart = DateTime.UtcNow; // dump clock starts once we're clear
+                        double tf0, jf0, ta0;
+                        DroneUtil.OreFill(grid, deposit.OreType, out tf0, out jf0, out ta0);
+                        MyLog.Default.WriteLineAndConsole(string.Format(
+                            "[ColonyFramework] Mission {0}: eject — clear of shaft ({1:F0} m out), dumping (cargo {2:P0}, junk {3:P0})",
+                            m.Id, EjectOffset, tf0, jf0));
                     }
                     else
                     {
@@ -793,22 +801,25 @@ namespace ColonyFramework
                     }
                 }
 
-                var con = DroneUtil.FindConnector(grid);
                 _bore.Drive(grid, drillFwd, downDir, 0); // hold position (dampers brake) beside the shaft
-                if (con != null) con.ThrowOut = true;
-                double junkLeft = DroneUtil.MoveJunkToConnector(grid, con, deposit.OreType);
+                // All connectors throw in parallel; mission ore is evacuated from them first (never thrown).
+                double junkLeft = DroneUtil.EjectJunk(grid, deposit.OreType, true);
+                double totalNow, junkNow, tgtNow;
+                DroneUtil.OreFill(grid, deposit.OreType, out totalNow, out junkNow, out tgtNow);
+                bool roomy = totalNow < ResumeCargoFrac; // enough working room to drill productively
                 bool timedOut = (DateTime.UtcNow - _ejectHoldStart).TotalSeconds > DumpHoldSecs;
-                if (junkLeft <= 1e-3 || timedOut)
+                if (junkLeft <= 1e-3 || roomy || timedOut)
                 {
-                    if (con != null) con.ThrowOut = false;
+                    // ThrowOut stays ON through the slide-back so loaded connectors keep draining on
+                    // the way; BoreDescend forces it off before re-entering the shaft.
                     _ejecting = false;
                     _ejectMovedOut = false;
                     _reentering = true;
                     _boreSub = BoreReposition;   // re-centre over the same + spot, then descend back in
                     _subStart = DateTime.UtcNow;
                     MyLog.Default.WriteLineAndConsole(string.Format(
-                        "[ColonyFramework] Mission {0}: eject — dumped{1}, re-entering shaft to {2:F1}m",
-                        m.Id, timedOut ? " (hold timeout)" : "", _ejectResumePen));
+                        "[ColonyFramework] Mission {0}: eject — dump done ({1}, cargo {2:P0}), re-entering shaft to {3:F1}m",
+                        m.Id, junkLeft <= 1e-3 ? "junk gone" : roomy ? "cargo room" : "45s cap", totalNow, _ejectResumePen));
                 }
             }
 
@@ -902,6 +913,7 @@ namespace ColonyFramework
             var con = DroneUtil.FindConnector(grid);
             if (con != null) con.ThrowOut = false; // never throw out valuable ore on the way home / at base
             ResetAscend();
+            DroneUtil.SetThrowOut(grid, false); // a retreat can interrupt a dump — never climb the shaft throwing into it
             _retreatSub = RetreatAscend;
             m.Phase = PhaseRetreat;
             MyLog.Default.WriteLineAndConsole(string.Format(
@@ -980,14 +992,16 @@ namespace ColonyFramework
                 // a stable hover (not a slow sink into terrain) through the up-to-45 s dump.
                 var rcj = DroneUtil.FindRc(grid);
                 if (rcj != null && !rcj.DampenersOverride) rcj.DampenersOverride = true;
-                var jcon = DroneUtil.FindConnector(grid);
-                if (jcon != null) jcon.ThrowOut = true;
-                double junkLeft = DroneUtil.MoveJunkToConnector(grid, jcon, deposit.OreType);
-                if (junkLeft <= 1e-3 || (DateTime.UtcNow - _ejectHoldStart).TotalSeconds > DumpHoldSecs)
+                // All connectors throw in parallel; mission ore evacuated from them first (never thrown).
+                double junkLeft = DroneUtil.EjectJunk(grid, deposit.OreType, true);
+                double tfj, jfj, taj;
+                DroneUtil.OreFill(grid, deposit.OreType, out tfj, out jfj, out taj);
+                bool cleanEnough = jfj < JunkDumpFrac; // mostly ore left — good enough to fly home with
+                if (junkLeft <= 1e-3 || cleanEnough || (DateTime.UtcNow - _ejectHoldStart).TotalSeconds > DumpHoldSecs)
                 {
-                    if (jcon != null) jcon.ThrowOut = false;
+                    DroneUtil.SetThrowOut(grid, false); // never throw at cruise speed — items spawn into own path
                     MyLog.Default.WriteLineAndConsole(string.Format(
-                        "[ColonyFramework] Mission {0}: jettison done, returning to base", m.Id));
+                        "[ColonyFramework] Mission {0}: jettison done (junk now {1:P0}), returning to base", m.Id, jfj));
                     if (!EngageReturn(colony, grid)) { CompleteMission(colony, m, grid); return; }
                     _retries = 0;
                     _retreatSub = RetreatReturn;

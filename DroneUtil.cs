@@ -152,18 +152,50 @@ namespace ColonyFramework
             targetOreAmt = tgtAmt;
         }
 
-        // Move all Stone/Ice (except the target ore) from the drone's cargo into its connector so a
-        // ThrowOut-enabled connector ejects it. Returns the junk amount still sitting in the connector
-        // (i.e. not yet ejected); 0 means the dump is complete. Caller toggles droneCon.ThrowOut.
-        public static double MoveJunkToConnector(IMyCubeGrid grid, IMyShipConnector droneCon, string targetOre)
+        private static bool IsJunkItem(MyInventoryItem item, string targetOre)
         {
-            if (droneCon == null) return 0;
-            var conInv = droneCon.GetInventory();
-            if (conInv == null) return 0;
+            if (item.Type.TypeId != "MyObjectBuilder_Ore") return false;
+            string sub = item.Type.SubtypeId;
+            return (sub == "Stone" || sub == "Ice") && sub != targetOre;
+        }
+
+        // All connectors on the grid (junk is ejected through every one in parallel).
+        public static List<IMyShipConnector> FindConnectors(IMyCubeGrid grid)
+        {
+            var cons = new List<IMyShipConnector>();
+            var ts = MyAPIGateway.TerminalActionsHelper.GetTerminalSystemForGrid(grid);
+            if (ts != null) ts.GetBlocksOfType(cons);
+            return cons;
+        }
+
+        // ThrowOut on/off across every connector (idempotent).
+        public static void SetThrowOut(IMyCubeGrid grid, bool on)
+        {
+            var cons = FindConnectors(grid);
+            for (int i = 0; i < cons.Count; i++) cons[i].ThrowOut = on;
+        }
+
+        // Junk ejection across ALL connectors. ThrowOut ejects a connector's ENTIRE inventory, so
+        // first any non-junk (mission ore! components!) is EVACUATED out of every connector back
+        // into cargo — the connectors must only ever hold Stone/Ice while throwing. Then junk is
+        // distributed round-robin into every connector (N connectors dump ~N× faster) and ThrowOut
+        // is set to 'throwOut' on all of them. Returns junk remaining on the whole grid (0 = done).
+        public static double EjectJunk(IMyCubeGrid grid, string targetOre, bool throwOut)
+        {
+            var cons = FindConnectors(grid);
+            var conInvs = new List<VRage.Game.ModAPI.IMyInventory>();
+            for (int c = 0; c < cons.Count; c++)
+            {
+                var ci = cons[c].GetInventory();
+                if (ci != null) conInvs.Add(ci);
+            }
 
             var blocks = new List<IMySlimBlock>();
             grid.GetBlocks(blocks);
             var items = new List<MyInventoryItem>();
+
+            // Cargo inventories = every cargo-ish inventory that is NOT a connector's.
+            var cargoInvs = new List<VRage.Game.ModAPI.IMyInventory>();
             for (int b = 0; b < blocks.Count; b++)
             {
                 var fat = blocks[b].FatBlock as IMyCubeBlock;
@@ -171,7 +203,37 @@ namespace ColonyFramework
                 for (int i = 0; i < fat.InventoryCount; i++)
                 {
                     var inv = fat.GetInventory(i);
-                    if (inv == null || inv == conInv) continue;
+                    if (inv == null || conInvs.Contains(inv)) continue;
+                    cargoInvs.Add(inv);
+                }
+            }
+
+            // 1) EVACUATE non-junk out of every connector — protect the mission ore.
+            for (int c = 0; c < conInvs.Count; c++)
+            {
+                var ci = conInvs[c];
+                bool moved = true; int guard = 0;
+                while (moved && guard++ < 200)
+                {
+                    moved = false;
+                    items.Clear();
+                    ci.GetItems(items);
+                    for (int it = 0; it < items.Count && !moved; it++)
+                    {
+                        if (IsJunkItem(items[it], targetOre)) continue;
+                        for (int d = 0; d < cargoInvs.Count; d++)
+                            if (ci.TransferItemTo(cargoInvs[d], it)) { moved = true; break; } // index shifts; re-scan
+                    }
+                }
+            }
+
+            // 2) Distribute junk from cargo into the connectors, round-robin.
+            if (throwOut && conInvs.Count > 0)
+            {
+                int rr = 0;
+                for (int s = 0; s < cargoInvs.Count; s++)
+                {
+                    var inv = cargoInvs[s];
                     bool moved = true; int guard = 0;
                     while (moved && guard++ < 200)
                     {
@@ -180,19 +242,17 @@ namespace ColonyFramework
                         inv.GetItems(items);
                         for (int it = 0; it < items.Count; it++)
                         {
-                            var item = items[it];
-                            if (item.Type.TypeId != "MyObjectBuilder_Ore") continue;
-                            string sub = item.Type.SubtypeId;
-                            if ((sub == "Stone" || sub == "Ice") && sub != targetOre)
-                            {
-                                if (inv.TransferItemTo(conInv, it)) { moved = true; break; } // index shifts; re-scan
-                            }
+                            if (!IsJunkItem(items[it], targetOre)) continue;
+                            if (inv.TransferItemTo(conInvs[rr++ % conInvs.Count], it)) { moved = true; break; }
                         }
                     }
                 }
             }
 
-            // Junk still on the whole grid (connector + any cargo that couldn't fit yet) — 0 = dump done.
+            // 3) Throw from every connector.
+            for (int c = 0; c < cons.Count; c++) cons[c].ThrowOut = throwOut;
+
+            // Junk still anywhere on the grid — 0 = dump complete.
             double junkLeft = 0;
             for (int b = 0; b < blocks.Count; b++)
             {
@@ -205,12 +265,7 @@ namespace ColonyFramework
                     items.Clear();
                     inv.GetItems(items);
                     for (int it = 0; it < items.Count; it++)
-                    {
-                        var item = items[it];
-                        if (item.Type.TypeId != "MyObjectBuilder_Ore") continue;
-                        string sub = item.Type.SubtypeId;
-                        if ((sub == "Stone" || sub == "Ice") && sub != targetOre) junkLeft += (double)item.Amount;
-                    }
+                        if (IsJunkItem(items[it], targetOre)) junkLeft += (double)items[it].Amount;
                 }
             }
             return junkLeft;

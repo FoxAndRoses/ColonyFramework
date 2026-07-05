@@ -47,7 +47,7 @@ namespace ColonyFramework
         private const double SiteRerouteSecs   = 3.0;   // orbit step / avoidance re-issue cadence at the site
         private const double ApproachTimeoutSecs = 180.0; // whole approach (incl. orbit) budget before deferring the block
         private const double WeldInSpeed       = 0.8;   // m/s nose-in creep (dampers on)
-        private const double WeldReach         = 2.0;   // m past the drone's own radius that counts as "in welder range"
+        private const double WeldReach         = 2.0;   // m — the welder TOOL's work-zone reach (stop when tool is this close)
         private const double SettleSpeed       = 0.5;
         private const double ContactSpeedEps   = 0.1;   // inward speed below this while pressing = contact
         private const double WeldBlockTimeoutSecs = 45.0; // per-block ceiling before deferring it
@@ -400,14 +400,13 @@ namespace ColonyFramework
             if (_coord != null && !_coord.TryClaim(m.Id, projector.EntityId, best.Position, _targetWorld))
                 return; // another welder claimed it between checks — re-select next pass
             // Radial approach: from the construction's volume center THROUGH the block, out to standoff.
-            // The radial's elevation is floored at horizontal — nothing is ever approached from below —
-            // and the point is clamped above terrain, so a ground-level block gets a level approach.
+            // TRUE radial, any angle — 45° down or up is fine (user-directed): the nose-in creep uses
+            // direct gyro control (Face), which CAN pitch, unlike autopilot. The terrain clamp below is
+            // the only floor — an approach point never ends up underground.
             Vector3D up0 = _nav.Valid ? _nav.GravityUp : Vector3D.Up;
             Vector3D center = projected.WorldAABB.Center;
             Vector3D radial = _targetWorld - center;
-            double downComp = Vector3D.Dot(radial, up0);
-            if (downComp < 0) radial -= up0 * downComp;      // strip the below-horizon component
-            if (radial.LengthSquared() < 1.0) radial = up0;  // dead-centre / straight-below: come from above
+            if (radial.LengthSquared() < 1.0) radial = up0;  // dead-centre: come from above
             radial = Vector3D.Normalize(radial);
             double selfRadius = grid.WorldAABB.HalfExtents.Length();
             _approachPoint = _orbit.ClampAboveTerrain(_targetWorld + radial * (selfRadius + ApproachStandoff), up0, ApproachMinAgl);
@@ -474,6 +473,7 @@ namespace ColonyFramework
                 { DeferTarget("blocked by structure"); return; }
             }
             DroneUtil.SetWelders(grid, true);
+            Log(m, "weld: tool on, creeping in"); // enable is otherwise invisible — testers reported "never enables"
             _weldStart = DateTime.UtcNow;
             _workSub = WorkWeldIn;
             ResetLeg();
@@ -482,16 +482,24 @@ namespace ColonyFramework
         private void TickWeldIn(Colony colony, Mission m, IMyCubeGrid grid, IMyProjector projector)
         {
             var projected = projector.ProjectedGrid;
-            Vector3D pos = grid.GetPosition();
-            Vector3D toBlock = _targetWorld - pos;
+
+            // Aim and stop by the WELDER TOOL, not the grid: the old grid-centre aim with an
+            // AABB-half-diagonal stop parked the tool itself out of range — the block never welded,
+            // timed out, deferred ("misses 95% of the time"). Face the welder's own forward down the
+            // line, creep from the welder's position, stop when the TOOL is within its work zone.
+            var welders = DroneUtil.FindWelders(grid);
+            if (welders.Count == 0) { Fail(colony, m, grid, "welders lost"); return; }
+            var tool = welders[0];
+            Vector3D toolPos = tool.GetPosition();
+            Vector3D toBlock = _targetWorld - toolPos;
             double dist = toBlock.Length();
             if (dist < 1e-2) return;
             Vector3D dir = toBlock / dist;
 
-            _fly.Face(grid, DroneUtil.FindRc(grid).WorldMatrix.Forward, dir); // welders face RC forward
+            _fly.Face(grid, tool.WorldMatrix.Forward, dir); // align the TOOL, wherever it's mounted
 
-            double selfRadius = grid.WorldAABB.HalfExtents.Length();
-            double stopDist = selfRadius + WeldReach;
+            double blockHalf = projected != null && projected.GridSizeEnum == VRage.Game.MyCubeSize.Large ? 1.25 : 0.25;
+            double stopDist = WeldReach + blockHalf; // tool within its ~2m work zone of the block face
 
             // Done? The projection no longer contains the cell once the block is placed; the welder
             // (still running, still in range) then welds it up. Give it a beat past placement.

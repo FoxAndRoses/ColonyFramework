@@ -120,6 +120,7 @@ namespace ColonyFramework
                 }
             }
 
+            _projectorId = m.TargetEntityId;
             var projector = MyAPIGateway.Entities.GetEntityById(m.TargetEntityId) as IMyProjector;
             if (projector == null || projector.Closed)
             { Complete(colony, m, grid, "projector gone"); return; }
@@ -157,9 +158,7 @@ namespace ColonyFramework
             }
             else
             {
-                DroneUtil.SetBatteriesRecharge(grid, true);
-                _chargeRefPct = DroneUtil.MinBatteryCharge(grid);
-                _chargeProgressTime = DateTime.UtcNow;
+                BeginCharging(grid); // job-scaled; skips Recharge entirely if already above the requirement
             }
             ResetLeg();
             _legStart = DateTime.UtcNow;
@@ -198,7 +197,7 @@ namespace ColonyFramework
 
             double charge = DroneUtil.MinBatteryCharge(grid);
             if (charge > _chargeRefPct + 0.01) { _chargeRefPct = charge; _chargeProgressTime = DateTime.UtcNow; }
-            bool charged = charge >= ChargeTargetPct || DroneUtil.HasInfinitePower(grid);
+            bool charged = charge >= _requiredCharge || DroneUtil.HasInfinitePower(grid);
             bool stalled = (DateTime.UtcNow - _chargeProgressTime).TotalSeconds > ChargeStallSecs;
             bool haveSomething = DroneUtil.CargoFill(grid) > 0.02;
             if ((charged || stalled) && haveSomething)
@@ -216,15 +215,31 @@ namespace ColonyFramework
         }
 
         private int _tmpProj, _tmpBlocks;
+        private double _requiredCharge = ChargeTargetPct;
+        private long _projectorId; // mission target, stashed each tick for helpers that lack the Mission
 
         private void EnterLoading(IMyCubeGrid grid)
         {
             _loading = true;
             _fly.Release(grid);
-            DroneUtil.SetBatteriesRecharge(grid, true);
-            _chargeRefPct = DroneUtil.MinBatteryCharge(grid);
-            _chargeProgressTime = DateTime.UtcNow;
+            BeginCharging(grid);
             _legStart = DateTime.UtcNow;
+        }
+
+        // Charge scaled to the JOB, not a flat target: a 5-block test print needs 30%, a big print
+        // still caps at ChargeTargetPct (50%) — never full; the parker's recharge-to-FULL applies
+        // only to IDLE-docked drones. Already above the requirement → skip Recharge mode entirely
+        // (batteries stay Auto): grab components and go.
+        private void BeginCharging(IMyCubeGrid grid)
+        {
+            int remaining = 100;
+            var proj = MyAPIGateway.Entities.GetEntityById(_projectorId) as IMyProjector;
+            if (proj != null && proj.IsProjecting) remaining = Math.Max(proj.RemainingBlocks, 1);
+            _requiredCharge = Math.Max(0.30, Math.Min(ChargeTargetPct, 0.25 + 0.005 * remaining));
+            double cur = DroneUtil.MinBatteryCharge(grid);
+            if (cur < _requiredCharge) DroneUtil.SetBatteriesRecharge(grid, true);
+            _chargeRefPct = cur;
+            _chargeProgressTime = DateTime.UtcNow;
         }
 
         // ── Transit to the site standoff (autopilot + avoidance) ─────────────────────────────────────

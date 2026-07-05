@@ -99,18 +99,10 @@ namespace ColonyFramework
             if (_tick % RefreshIntervalTicks == 0) _scanScheduler.RefreshDetectors();
             if (_tick % ScanIntervalTicks == 0) _scanScheduler.Step(_registry, ref _scanTick);
 
-            if (_tick % GenIntervalTicks == 0)
-            {
-                foreach (var colony in _registry.Colonies)
-                {
-                    if (!colony.Active) continue;
-                    int made = colony.Missions.GenerateMineMissions(_scanTick, _production.AllowIceMining(colony));
-                    if (made > 0)
-                        MyLog.Default.WriteLineAndConsole(string.Format(
-                            "[ColonyFramework] Colony {0}: generated {1} mine missions; total: {2}",
-                            colony.OwnerKey, made, colony.Missions.Missions.Count));
-                }
-            }
+            // Mining is DEMAND-DRIVEN: ProductionService creates targeted Mine missions for ores the
+            // colony actually needs (blueprint shortfalls + the ice reserve). The old blanket
+            // one-mission-per-deposit generator queued the entire deposit DB (692 missions in one
+            // tick in testing) and sent drones after ore nobody wanted — retired.
 
             if (_tick % AssignIntervalTicks == 0)
             {

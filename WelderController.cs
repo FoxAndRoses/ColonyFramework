@@ -605,7 +605,8 @@ namespace ColonyFramework
             Vector3D pos = grid.GetPosition();
             double agl;
             if (DroneUtil.TryGetAltitude(grid, out agl) && agl < CruiseAltitudeAgl)
-                rc.AddWaypoint(pos + (_nav.Valid ? _nav.GravityUp : Vector3D.Up) * (CruiseAltitudeAgl - agl), "climb to cruise");
+                rc.AddWaypoint(MinerController.ClimbPoint(pos, target, _nav.Valid ? _nav.GravityUp : Vector3D.Up,
+                    CruiseAltitudeAgl - agl), "climb to cruise");
             if (via.HasValue) rc.AddWaypoint(via.Value, "avoid detour");
             rc.AddWaypoint(target, label);
             rc.FlightMode = FlightMode.OneWay;

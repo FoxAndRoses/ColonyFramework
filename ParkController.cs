@@ -220,7 +220,7 @@ namespace ColonyFramework
             double agl;
             Vector3D up = _nav.Valid ? _nav.GravityUp : Vector3D.Up;
             if (DroneUtil.TryGetAltitude(grid, out agl) && agl < CruiseAltitudeAgl)
-                rc.AddWaypoint(pos + up * (CruiseAltitudeAgl - agl), "climb to cruise");
+                rc.AddWaypoint(MinerController.ClimbPoint(pos, target, up, CruiseAltitudeAgl - agl), "climb to cruise");
             if (via.HasValue) rc.AddWaypoint(via.Value, "avoid detour");
             rc.AddWaypoint(target, "park: base standoff");
             rc.FlightMode = FlightMode.OneWay;

@@ -17,43 +17,20 @@ namespace ColonyFramework
 
         public IReadOnlyList<Mission> Missions { get { return _state.Missions; } }
 
-        // One Mine mission per Unclaimed deposit with no active mission. Ice deposits are gated by
-        // demand (allowIce, decided by the caller from gas equipment + reserve stock) — nobody wants
-        // drones dutifully strip-mining an ice sheet no recipe needs. Returns count created.
-        public int GenerateMineMissions(long tick, bool allowIce = true)
+        // Demand-driven cleanup: retire PENDING Mine missions whose ore isn't currently demanded
+        // (assigned / in-flight ones finish normally). Also drains the legacy blanket-generated
+        // backlog on old saves. Returns count retired.
+        public int RetirePendingMineExcept(HashSet<string> demandedOres)
         {
-            int created = 0;
-            var deps = _deposits.Deposits;
-            for (int i = 0; i < deps.Count; i++)
+            int retired = 0;
+            for (int i = 0; i < _state.Missions.Count; i++)
             {
-                var d = deps[i];
-                if (d.Status != DepositStatus.Unclaimed) continue;
-                if (!allowIce && d.OreType == "Ice") continue;
-                if (HasActiveMissionFor(d.Id)) continue;
-
-                _state.Missions.Add(new Mission
-                {
-                    Id = _state.NextMissionId++,
-                    Type = MissionType.Mine,
-                    TargetDepositId = d.Id,
-                    AssignedAssetId = 0,
-                    Status = MissionStatus.PendingAssignment,
-                    CreatedTick = tick
-                });
-                created++;
+                var m = _state.Missions[i];
+                if (m.Type != MissionType.Mine || m.Status != MissionStatus.PendingAssignment) continue;
+                var d = _deposits.GetById(m.TargetDepositId);
+                if (d == null || !demandedOres.Contains(d.OreType)) { Fail(m.Id); retired++; }
             }
-
-            // Ice demand just went away: retire ice missions still waiting for a drone (assigned /
-            // in-flight ones finish normally) so the queue doesn't hold dead weight.
-            if (!allowIce)
-                for (int i = 0; i < _state.Missions.Count; i++)
-                {
-                    var m = _state.Missions[i];
-                    if (m.Type != MissionType.Mine || m.Status != MissionStatus.PendingAssignment) continue;
-                    var d = _deposits.GetById(m.TargetDepositId);
-                    if (d != null && d.OreType == "Ice") Fail(m.Id);
-                }
-            return created;
+            return retired;
         }
 
         // Up to 'allowed' concurrent Weld missions per projector (multi-welder: the count scales with

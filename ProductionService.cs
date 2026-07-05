@@ -6,6 +6,7 @@ using VRage;
 using VRage.Game;
 using VRage.ObjectBuilders;
 using VRage.Utils;
+using VRageMath;
 using IMyCubeGrid = VRage.Game.ModAPI.IMyCubeGrid;
 using IMyCubeBlock = VRage.Game.ModAPI.IMyCubeBlock;
 
@@ -63,14 +64,23 @@ namespace ColonyFramework
             var grid = core.CubeGrid;
 
             var status = Rollup(colony, grid);
-            if (!status.Projecting) { _state.Remove(colony.OwnerKey); return; }
             var st = GetState(colony.OwnerKey);
+
+            // Demand-driven mining runs with or without a projection: blueprint ore shortfalls plus
+            // the standing ice reserve define what's worth mining; everything else is left in the
+            // ground and stale pending missions are retired.
+            TickDemandMining(colony, core, status);
+
+            if (!status.Projecting) { st.ReadySince = default(DateTime); return; }
 
             // A projecting blueprint with blocks left gets Weld missions — one welder per
             // MinBlocksPerWelder (~40) remaining blocks, capped at 3, so a big print gets a crew from
             // the start and a near-done one doesn't hog drones. Welding runs in PARALLEL with
             // component production — CanBuild + cargo gate what's actually weldable.
-            var projectors = CollectGroup<IMyProjector>(grid);
+            // Projectors are found by PROXIMITY (colony-owned grids within ProjectorRange of the
+            // core), not just the core's physical group — a detached printing pad next to the base
+            // is a build site too.
+            var projectors = FindColonyProjectors(colony, grid);
             long nowTick = MyAPIGateway.Session.GameDateTime.Ticks;
             for (int i = 0; i < projectors.Count; i++)
             {
@@ -103,20 +113,14 @@ namespace ColonyFramework
                 else if (assemblers == 0)
                     Announce(colony, "have the materials but no working assembler to build the blueprint", false);
             }
-            else // short on ore -> target it for mining (general mining already runs; this prioritises the gap)
+            else // short on ore — mining is already being driven by TickDemandMining; chat/survey here
             {
                 st.ReadySince = default(DateTime);
 
                 long tick = MyAPIGateway.Session.GameDateTime.Ticks;
-                var basePos = core.GetPosition();
-                int created = 0;
                 string unknownOre = null; // an ore we need but have NO deposit of anywhere in the DB
                 foreach (var kv in status.MissingOre)
-                {
-                    var dep = colony.Deposits.FindNearestUnclaimed(basePos, kv.Key);
-                    if (dep != null && colony.Missions.CreateMineMission(dep.Id, tick)) created++;
-                    else if (dep == null && unknownOre == null && !HasAnyDeposit(colony, kv.Key)) unknownOre = kv.Key;
-                }
+                    if (!HasAnyDeposit(colony, kv.Key)) { unknownOre = kv.Key; break; }
 
                 // A needed ore isn't in the deposit DB AT ALL — send a scout to look for it (cooldown-gated).
                 if (unknownOre != null && (DateTime.UtcNow - st.LastSurvey).TotalSeconds > SurveyCooldownSecs
@@ -136,9 +140,7 @@ namespace ColonyFramework
                     if (!MyAPIGateway.Utilities.IsDedicated)
                         MyAPIGateway.Utilities.ShowMessage("Colony", "production waiting on ore: " + Summarize(status.MissingOre, "") + " — mining");
                     MyLog.Default.WriteLineAndConsole(string.Format(
-                        "[ColonyFramework] production: short ore {0}; {1}",
-                        Summarize(status.MissingOre, ""),
-                        created > 0 ? ("created " + created + " mine mission(s)") : "matching deposits already claimed/mining"));
+                        "[ColonyFramework] production: short ore {0}", Summarize(status.MissingOre, "")));
                 }
             }
         }
@@ -305,6 +307,68 @@ namespace ColonyFramework
                 result.AddRange(tmp);
             }
             return result;
+        }
+
+        private const double ProjectorRange = 500.0; // m around the core within which colony projectors count
+
+        // All active projectors on COLONY-OWNED grids near the core — the core's own group plus any
+        // detached grid (printing pad, dry dock) within ProjectorRange. Owner-filtered so a
+        // neighbour's projector never becomes our build order.
+        private List<IMyProjector> FindColonyProjectors(Colony colony, IMyCubeGrid coreGrid)
+        {
+            var result = CollectGroup<IMyProjector>(coreGrid); // the base itself, as before
+            var seen = new HashSet<long>();
+            for (int i = 0; i < result.Count; i++) seen.Add(result[i].EntityId);
+
+            var sphere = new BoundingSphereD(coreGrid.GetPosition(), ProjectorRange);
+            var nearby = MyAPIGateway.Entities.GetTopMostEntitiesInSphere(ref sphere);
+            var tmp = new List<IMyProjector>();
+            for (int i = 0; i < nearby.Count; i++)
+            {
+                var g = nearby[i] as IMyCubeGrid;
+                if (g == null) continue;
+                var owners = g.BigOwners;
+                if (owners == null || owners.Count == 0) continue;
+                bool ours = false;
+                for (int o = 0; o < owners.Count && !ours; o++)
+                    if (Ownership.ResolveOwnerKey(owners[o]) == colony.OwnerKey) ours = true;
+                if (!ours) continue;
+
+                var ts = MyAPIGateway.TerminalActionsHelper.GetTerminalSystemForGrid(g);
+                if (ts == null) continue;
+                tmp.Clear();
+                ts.GetBlocksOfType(tmp);
+                for (int p = 0; p < tmp.Count; p++)
+                    if (seen.Add(tmp[p].EntityId)) result.Add(tmp[p]);
+            }
+            return result;
+        }
+
+        // The single source of mining demand: blueprint ore shortfalls (when projecting) plus the
+        // standing ice reserve. Creates one targeted Mine mission per demanded ore per tick (the
+        // per-deposit claim naturally staggers a fleet), and RETIRES pending missions for ore nobody
+        // wants — drones never fly for the sake of flying.
+        private void TickDemandMining(Colony colony, IMyCubeBlock core, ProductionStatus status)
+        {
+            var demanded = new HashSet<string>();
+            if (status.Projecting)
+                foreach (var kv in status.MissingOre) demanded.Add(kv.Key);
+            if (AllowIceMining(colony)) demanded.Add("Ice");
+
+            long tick = MyAPIGateway.Session.GameDateTime.Ticks;
+            var basePos = core.GetPosition();
+            foreach (var ore in demanded)
+            {
+                var dep = colony.Deposits.FindNearestUnclaimed(basePos, ore);
+                if (dep != null && colony.Missions.CreateMineMission(dep.Id, tick))
+                    MyLog.Default.WriteLineAndConsole(string.Format(
+                        "[ColonyFramework] production: demand mining {0} — mission for deposit {1}", ore, dep.Id));
+            }
+
+            int retired = colony.Missions.RetirePendingMineExcept(demanded);
+            if (retired > 0)
+                MyLog.Default.WriteLineAndConsole(string.Format(
+                    "[ColonyFramework] production: retired {0} pending mine mission(s) for undemanded ore", retired));
         }
 
         // Ice is only worth mining when something can USE it: O2/H2 generators consume it (keep a

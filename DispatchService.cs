@@ -43,14 +43,23 @@ namespace ColonyFramework
             return msg;
         }
 
-        // Autonomous dispatch: launch every Assigned mission whose asset is present and flyable (sets it
-        // InProgress → commissioning). Called each assignment cycle so a drone that just recharged and
-        // freed up gets its next mission without a manual /colony dispatch. Returns count launched.
+        private readonly System.Collections.Generic.Dictionary<long, System.DateTime> _lastLaunch
+            = new System.Collections.Generic.Dictionary<long, System.DateTime>();
+        private const double LaunchSpacingSecs = 12.0; // min gap between launches per colony (takeoff separation)
+
+        // Autonomous dispatch: launch Assigned missions whose assets are present and flyable (sets
+        // them InProgress → commissioning). STAGGERED: at most one launch per colony per
+        // LaunchSpacingSecs — two drones lifting off the same second from adjacent pads collided in
+        // testing (avoidance can't help at 0 m separation). Returns count launched (0 or 1).
         public int AutoDispatchAssigned(Colony colony)
         {
+            System.DateTime last;
+            if (_lastLaunch.TryGetValue(colony.OwnerKey, out last)
+                && (System.DateTime.UtcNow - last).TotalSeconds < LaunchSpacingSecs) return 0;
+
             int launched = 0;
             var ms = colony.Missions.Missions;
-            for (int i = 0; i < ms.Count; i++)
+            for (int i = 0; i < ms.Count && launched == 0; i++)
             {
                 var mission = ms[i];
                 if (mission.Status != MissionStatus.Assigned) continue;
@@ -64,9 +73,10 @@ namespace ColonyFramework
                 colony.Missions.SetInProgress(mission.Id);
                 mission.Phase = PhaseCommission;
                 launched++;
+                _lastLaunch[colony.OwnerKey] = System.DateTime.UtcNow;
                 MyLog.Default.WriteLineAndConsole(string.Format(
-                    "[ColonyFramework] Auto-dispatching '{0}' for deposit {1} (mission {2})",
-                    grid.DisplayName, mission.TargetDepositId, mission.Id));
+                    "[ColonyFramework] Auto-dispatching '{0}' (mission {1}, {2})",
+                    grid.DisplayName, mission.Id, mission.Type));
             }
             return launched;
         }

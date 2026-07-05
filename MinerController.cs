@@ -46,6 +46,7 @@ namespace ColonyFramework
         private const int RetreatAscend = 0; // reverse straight up out of the shaft
         private const int RetreatLevel  = 1; // pitch to horizontal/level before turning to head home
         private const int RetreatReturn = 2; // autopilot to the colony-core standoff
+        private const int RetreatJettison = 3; // dump leftover stone/ice at altitude before flying home
 
         private const float  TransitSpeedLimit  = 25f; // careful cap used near the base / destination
         private const float  CruiseSpeedLimit   = 70f; // fast cruise in open air between base and deposit
@@ -137,7 +138,8 @@ namespace ColonyFramework
         private const double YieldEps           = 1.0;  // min target-ore amount gain that counts as "still hitting ore"
         private const double YieldDepthWindow   = 2.0;  // m drilled past the known ore depth with no ore gain = exhausted, stop the bore
         private const double MaxBoreDepth       = 60.0; // hard per-bore depth cap (safety; replaces the old fixed-depth stop)
-        private const double DumpHoldSecs       = 8.0;  // max time to hold out of the shaft ejecting before re-entering
+        private const double DumpHoldSecs       = 45.0; // max dump time (8s never emptied a full cargo — "hold timeout" loops)
+        private const double EjectOffset        = 15.0; // m sideways from the shaft before opening the connector
         private const double BoreTimeoutSeconds = 600;  // ceiling = 10-min runtime floor
         private const double AlignmentMinDot    = 0.7;
         private const double StuckDistance      = 1.0;
@@ -201,6 +203,7 @@ namespace ColonyFramework
         private bool _reentering;      // returning down the same shaft after a dump (resume drilling, keep _boreContact)
         private double _ejectResumePen;// depth we left the bore at, to descend back to
         private DateTime _ejectHoldStart; // when the dump hold began
+        private bool _ejectMovedOut;   // slid clear of the shaft before opening the connector
         private double _yieldRefPen;   // deepest pen at which target ore was still being collected this bore
         private double _yieldRefAmt;   // target-ore amount in cargo at that point (yield-stall detection)
         private bool _depositExhausted;// true once the whole + is mined out → deplete (else release for another pass)
@@ -359,7 +362,7 @@ namespace ColonyFramework
             Vector3D pos = grid.GetPosition();
             double agl;
             if (DroneUtil.TryGetAltitude(grid, out agl) && agl < CruiseAltitudeAgl)
-                rc.AddWaypoint(pos + Up(pos) * (CruiseAltitudeAgl - agl), "climb to cruise");
+                rc.AddWaypoint(ClimbPoint(pos, target, Up(pos), CruiseAltitudeAgl - agl), "climb to cruise");
             if (via.HasValue) rc.AddWaypoint(via.Value, "avoid detour"); // one transient detour point — re-derived each probe, never stored
             rc.AddWaypoint(target, label);
             rc.FlightMode = FlightMode.OneWay;
@@ -700,6 +703,7 @@ namespace ColonyFramework
                         // Cargo is clogged with ice/stone — back out, dump it, re-enter THIS shaft.
                         _ejectResumePen = Vector3D.Dot(pos - _boreContact, downDir);
                         _ejecting = true;
+                        _ejectMovedOut = false; // each eject re-does the slide-off-shaft before dumping
                         _boreSub = BoreAscend;
                         _subStart = DateTime.UtcNow;
                         ResetAscend();
@@ -766,8 +770,31 @@ namespace ColonyFramework
             }
             else // BoreEjectDump
             {
+                // MOVE AWAY FIRST: dumping while hovering over the shaft rains the junk straight back
+                // into the bore (seen in testing: the drone couldn't re-enter its own hole and got
+                // stuck on its own ejected ice). Slide ~15 m to the side, THEN open the connector.
+                if (!_ejectMovedOut)
+                {
+                    Vector3D away = pos - deposit.Position;
+                    Vector3D lateral = away - downDir * Vector3D.Dot(away, downDir);
+                    if (lateral.LengthSquared() < 1.0) lateral = Vector3D.CalculatePerpendicularVector(downDir);
+                    lateral = Vector3D.Normalize(lateral);
+                    Vector3D horizFromShaft = pos - deposit.Position - downDir * Vector3D.Dot(pos - deposit.Position, downDir);
+                    if (horizFromShaft.Length() >= EjectOffset)
+                    {
+                        _ejectMovedOut = true;
+                        _ejectHoldStart = DateTime.UtcNow; // dump clock starts once we're clear
+                    }
+                    else
+                    {
+                        _bore.Drive(grid, drillFwd, downDir, 0);            // hold nose-down; dampers hold altitude
+                        _bore.ThrustAlong(grid, lateral, RepoSpeed);        // slide sideways off the shaft
+                        return;
+                    }
+                }
+
                 var con = DroneUtil.FindConnector(grid);
-                _bore.Drive(grid, drillFwd, downDir, 0); // hold position (dampers brake); connector faces up, ejects upward
+                _bore.Drive(grid, drillFwd, downDir, 0); // hold position (dampers brake) beside the shaft
                 if (con != null) con.ThrowOut = true;
                 double junkLeft = DroneUtil.MoveJunkToConnector(grid, con, deposit.OreType);
                 bool timedOut = (DateTime.UtcNow - _ejectHoldStart).TotalSeconds > DumpHoldSecs;
@@ -775,6 +802,7 @@ namespace ColonyFramework
                 {
                     if (con != null) con.ThrowOut = false;
                     _ejecting = false;
+                    _ejectMovedOut = false;
                     _reentering = true;
                     _boreSub = BoreReposition;   // re-centre over the same + spot, then descend back in
                     _subStart = DateTime.UtcNow;
@@ -785,7 +813,17 @@ namespace ColonyFramework
             }
 
             // Stuck watchdog (real-hang safety): reset whenever the drone moves > StuckDistance.
-            if (!_progressInit || Vector3D.Distance(pos, _progressPos) > StuckDistance)
+            // EXCEPTION: the eject DUMP HOLD (slid off the shaft, ejecting) is a deliberate stationary
+            // hold of up to DumpHoldSecs (45 s) — longer than StuckSeconds (20 s) — so without this
+            // exemption the watchdog would abort every full-cargo dump mid-way. The slide-out phase
+            // (still moving off the shaft) stays watched, so a drone that truly can't move is caught.
+            if (_ejecting && _ejectMovedOut)
+            {
+                _progressPos = pos;              // keep the clock fresh so resuming the bore isn't instantly "stuck"
+                _progressTime = DateTime.UtcNow;
+                _progressInit = true;
+            }
+            else if (!_progressInit || Vector3D.Distance(pos, _progressPos) > StuckDistance)
             {
                 _progressPos = pos;
                 _progressTime = DateTime.UtcNow;
@@ -912,12 +950,46 @@ namespace ColonyFramework
                 if (levelDot > LevelDot)
                 {
                     _bore.Release(grid);
+                    // Never haul stone/ice home: whatever junk is still aboard (a bore that ended in
+                    // overburden, an interrupted eject) gets jettisoned HERE — 30 m up, hovering, and
+                    // leaving — before the return leg. The target ore always stays.
+                    double totalFrac, junkFrac, tgtAmt;
+                    DroneUtil.OreFill(grid, deposit.OreType, out totalFrac, out junkFrac, out tgtAmt);
+                    if (junkFrac >= JunkDumpFrac)
+                    {
+                        _retreatSub = RetreatJettison;
+                        _ejectHoldStart = DateTime.UtcNow;
+                        MyLog.Default.WriteLineAndConsole(string.Format(
+                            "[ColonyFramework] Mission {0}: jettisoning stone/ice before return (junk {1:P0})", m.Id, junkFrac));
+                        return;
+                    }
                     MyLog.Default.WriteLineAndConsole(string.Format(
                         "[ColonyFramework] Mission {0}: level, returning to base", m.Id));
                     if (!MyAPIGateway.Utilities.IsDedicated)
                         MyAPIGateway.Utilities.ShowMessage("Colony", "Mining mission complete, returning to base");
                     if (!EngageReturn(colony, grid)) { CompleteMission(colony, m, grid); return; }
                     _retries = 0; // sub-state advanced — progress
+                    _retreatSub = RetreatReturn;
+                }
+                return;
+            }
+
+            if (_retreatSub == RetreatJettison)
+            {
+                // RetreatLevel released all thrust/gyro overrides; assert dampeners so the drone holds
+                // a stable hover (not a slow sink into terrain) through the up-to-45 s dump.
+                var rcj = DroneUtil.FindRc(grid);
+                if (rcj != null && !rcj.DampenersOverride) rcj.DampenersOverride = true;
+                var jcon = DroneUtil.FindConnector(grid);
+                if (jcon != null) jcon.ThrowOut = true;
+                double junkLeft = DroneUtil.MoveJunkToConnector(grid, jcon, deposit.OreType);
+                if (junkLeft <= 1e-3 || (DateTime.UtcNow - _ejectHoldStart).TotalSeconds > DumpHoldSecs)
+                {
+                    if (jcon != null) jcon.ThrowOut = false;
+                    MyLog.Default.WriteLineAndConsole(string.Format(
+                        "[ColonyFramework] Mission {0}: jettison done, returning to base", m.Id));
+                    if (!EngageReturn(colony, grid)) { CompleteMission(colony, m, grid); return; }
+                    _retries = 0;
                     _retreatSub = RetreatReturn;
                 }
                 return;
@@ -1023,6 +1095,16 @@ namespace ColonyFramework
             float interference;
             Vector3D g = MyAPIGateway.Physics.CalculateNaturalGravityAt(at, out interference);
             return g.LengthSquared() > 0.01 ? -Vector3D.Normalize(g) : Vector3D.Up;
+        }
+
+        // Climb waypoint biased ~20 m toward the destination: two drones lifting off together head
+        // for DIFFERENT climb points and diverge immediately instead of stacking in one column.
+        public static Vector3D ClimbPoint(Vector3D pos, Vector3D target, Vector3D up, double climb)
+        {
+            Vector3D toT = target - pos;
+            Vector3D horiz = toT - up * Vector3D.Dot(toT, up);
+            if (horiz.LengthSquared() > 1.0) horiz = Vector3D.Normalize(horiz) * 20.0;
+            return pos + up * climb + horiz;
         }
 
         private void EngageAutopilot(IMyCubeGrid grid, Vector3D point)

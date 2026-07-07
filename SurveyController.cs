@@ -40,8 +40,7 @@ namespace ColonyFramework
 
         private readonly OreScanner _scanner = new OreScanner();
         private readonly NavState _nav = new NavState();
-        private readonly AvoidanceProbe _avoid = new AvoidanceProbe();
-        private readonly BoreController _fly = new BoreController(); // Release only
+        private readonly FlightController _fc = new FlightController(); // F4.3: all legs on the flight core
 
         private bool _initialized;
         private int _retries;
@@ -89,6 +88,7 @@ namespace ColonyFramework
                 case PhaseSurvey:     TickSurvey(colony, m, grid, core); break;
                 case PhaseReturn:     TickReturn(colony, m, grid, core); break;
             }
+            _fc.Tick(grid); // one actuator owner (FLIGHT.md §5.1)
         }
 
         private void TickCommission(Colony colony, Mission m, IMyCubeGrid grid, VRage.Game.ModAPI.IMyCubeBlock core)
@@ -121,28 +121,12 @@ namespace ColonyFramework
         {
             if (!_hasWaypoint) { NextWaypoint(colony, m, grid, core); return; }
 
-            double dist = Vector3D.Distance(grid.GetPosition(), _waypoint);
-            if (dist > ArriveTol || _nav.Speed > 1.0)
-            {
-                var rc = DroneUtil.FindRc(grid);
-                if (rc != null && !rc.DampenersOverride) rc.DampenersOverride = true;
-                Vector3D via; string obstacle;
-                if (_avoid.TryGetDetour(_nav, grid, _waypoint, out via, out obstacle, SurveyTerrainClearance)
-                    && (DateTime.UtcNow - _lastReroute).TotalSeconds >= 3.0)
-                {
-                    _lastReroute = DateTime.UtcNow;
-                    FlyTo(grid, _waypoint, SurveySpeed, "survey point", via);
-                    Log(m, string.Format("deflected around obstacle {0}", obstacle));
-                    return;
-                }
-                string fail = LegOk(dist, LegTimeoutSecs, "survey leg");
-                if (fail != null) RetryOrFail(colony, m, grid, fail);
-                return;
-            }
+            // F4.3: the flight core owns the leg (steering handles terrain/grids; no detour churn).
+            if (_fc.Status == FlightController.VerbStatus.Failed)
+            { RetryOrFail(colony, m, grid, "survey leg: " + _fc.FailReason); return; }
+            if (_fc.Status != FlightController.VerbStatus.Done) return;
 
             // Arrived + settled: one bounded scan at this point, advance the persistent cursor.
-            var rcs = DroneUtil.FindRc(grid);
-            if (rcs != null) rcs.SetAutoPilotEnabled(false);
             m.Phase = PhaseSurvey;
             _retries = 0;
 
@@ -198,56 +182,27 @@ namespace ColonyFramework
             }
             _waypoint = point;
             _hasWaypoint = true;
-            FlyTo(grid, _waypoint, SurveySpeed, "survey point", null);
+            _fc.MoveTo(grid, _waypoint, SurveySpeed); // low legs: steering's terrain probes ride along
         }
 
         private void BeginReturn(Colony colony, Mission m, IMyCubeGrid grid)
         {
-            _fly.Release(grid);
             m.Phase = PhaseReturn;
             var core = MyAPIGateway.Entities.GetEntityById(colony.State.CoreEntityId);
             if (core == null) { Complete(colony, m, grid, "no core"); return; }
             Vector3D standoff = core.GetPosition() + (_nav.Valid ? _nav.GravityUp : Vector3D.Up) * 100.0;
-            FlyTo(grid, standoff, SurveySpeed, "return", null);
-            ResetLeg();
+            _fc.Transit(grid, FlightCorridor.Plan(grid.GetPosition(), standoff, _fc.Profile.CruiseAgl), SurveySpeed * 2);
         }
 
         private void TickReturn(Colony colony, Mission m, IMyCubeGrid grid, VRage.Game.ModAPI.IMyCubeBlock core)
         {
-            Vector3D standoff = core.GetPosition() + (_nav.Valid ? _nav.GravityUp : Vector3D.Up) * 100.0;
-            double dist = Vector3D.Distance(grid.GetPosition(), standoff);
-            if (dist > ArriveDistance)
-            {
-                var rc = DroneUtil.FindRc(grid);
-                if (rc != null && !rc.DampenersOverride) rc.DampenersOverride = true;
-                Vector3D via; string obstacle;
-                if (_avoid.TryGetDetour(_nav, grid, standoff, out via, out obstacle)
-                    && (DateTime.UtcNow - _lastReroute).TotalSeconds >= 3.0)
-                { _lastReroute = DateTime.UtcNow; FlyTo(grid, standoff, SurveySpeed, "return", via); return; }
-                string fail = LegOk(dist, LegTimeoutSecs, "survey return");
-                if (fail != null) RetryOrFail(colony, m, grid, fail);
-                return;
-            }
-            var rc2 = DroneUtil.FindRc(grid);
-            if (rc2 != null) rc2.SetAutoPilotEnabled(false);
+            if (_fc.Status == FlightController.VerbStatus.Failed)
+            { RetryOrFail(colony, m, grid, "survey return: " + _fc.FailReason); return; }
+            if (_fc.Status != FlightController.VerbStatus.Done) return;
+            _fc.Release(grid);
             Complete(colony, m, grid, string.Format(
                 "{0} points scanned; coverage now {1:F0} m @ {2:F0}°",
                 _pointsDone, colony.State.SurveyedRadius, colony.State.SurveyedAngleDeg));
-        }
-
-        // ── helpers (same discipline as the other controllers) ──────────────────────────────────────
-        private void FlyTo(IMyCubeGrid grid, Vector3D target, float speed, string label, Vector3D? via)
-        {
-            var rc = DroneUtil.FindRc(grid);
-            if (rc == null) return;
-            rc.DampenersOverride = true;
-            rc.ClearWaypoints();
-            if (via.HasValue) rc.AddWaypoint(via.Value, "avoid detour");
-            rc.AddWaypoint(target, label);
-            rc.FlightMode = FlightMode.OneWay;
-            rc.SpeedLimit = speed;
-            rc.SetAutoPilotEnabled(true);
-            ResetLeg();
         }
 
         private void RefreshPlanet(Vector3D near)
@@ -278,7 +233,7 @@ namespace ColonyFramework
             _retries++;
             if (_retries > MaxRetries) { Fail(colony, m, grid, reason); return; }
             Log(m, string.Format("retry {0}/{1} — {2}", _retries, MaxRetries, reason));
-            _fly.Release(grid);
+            _fc.Release(grid);
             var rc = DroneUtil.FindRc(grid);
             if (rc != null) { rc.SetAutoPilotEnabled(false); rc.DampenersOverride = true; }
             if (m.Phase == PhaseReturn) BeginReturn(colony, m, grid);
@@ -319,7 +274,7 @@ namespace ColonyFramework
         {
             if (grid == null) return;
             DroneUtil.SetBatteriesRecharge(grid, false); // never leave Recharge leaked into idle
-            _fly.Release(grid);
+            _fc.Release(grid);
             var rc = DroneUtil.FindRc(grid);
             if (rc != null) { rc.SetAutoPilotEnabled(false); rc.DampenersOverride = true; }
         }

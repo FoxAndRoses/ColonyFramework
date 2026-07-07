@@ -30,10 +30,10 @@ namespace ColonyFramework
         private const double CruiseAltitudeAgl = 100.0;
 
         private readonly NavState _nav = new NavState();
-        private readonly BoreController _fly = new BoreController();
+        private readonly BoreController _fly = new BoreController();   // touchdown sink only
         private readonly OrbitNav _terrain = new OrbitNav();
         private readonly DockMachine _dock = new DockMachine();
-        private readonly AvoidanceProbe _avoid = new AvoidanceProbe();
+        private readonly FlightController _fc = new FlightController(); // F4.3: flight legs on the core
 
         private int _state = PDecide;
         private Vector3D _spot, _hoverPoint;
@@ -73,6 +73,7 @@ namespace ColonyFramework
                 case PDescend:  TickDescend(asset, grid); break;
                 case PTouchdown: TickTouchdown(asset, grid); break;
             }
+            _fc.Tick(grid); // one actuator owner; no-op while the dock machine or touchdown sink drives
         }
 
         private void Decide(Colony colony, AssetRecord asset, IMyCubeGrid grid, IMyCubeBlock core, IMyShipConnector droneCon)
@@ -84,7 +85,7 @@ namespace ColonyFramework
             if (Vector3D.Distance(pos, basePos) > HomeRange)
             {
                 DroneUtil.PrepareForFlight(grid);
-                CruiseHome(grid, basePos + up * 100.0);
+                _fc.Transit(grid, FlightCorridor.Plan(pos, basePos + up * 100.0, _fc.Profile.CruiseAgl), HomeSpeed);
                 _state = PGoHome;
                 _legStart = DateTime.UtcNow;
                 Log(asset, "idle far from base — heading home to park");
@@ -97,6 +98,7 @@ namespace ColonyFramework
             if (droneCon != null && connectorAvailable)
             {
                 DroneUtil.PrepareForFlight(grid);
+                _fc.Release(grid); // the dock machine owns the actuators from here
                 _dock.Reset();
                 _state = PDock;
                 Log(asset, "idle — docking at a free connector to recharge");
@@ -111,7 +113,7 @@ namespace ColonyFramework
             _spot = _terrain.PinToSurface(basePos + lateral * LandOffset, up, 1.0);
             _hoverPoint = _spot + up * DescendHover;
             DroneUtil.PrepareForFlight(grid);
-            FlyTo(grid, _hoverPoint, 8f, "landing hover");
+            _fc.MoveTo(grid, _hoverPoint, 8.0);
             _state = PDescend;
             _legStart = DateTime.UtcNow;
             Log(asset, "idle, no free connector — landing near base");
@@ -119,23 +121,10 @@ namespace ColonyFramework
 
         private void TickGoHome(AssetRecord asset, IMyCubeGrid grid, IMyCubeBlock core)
         {
-            Vector3D up = _nav.Valid ? _nav.GravityUp : Vector3D.Up;
-            Vector3D standoff = core.GetPosition() + up * 100.0;
-            double dist = Vector3D.Distance(grid.GetPosition(), standoff);
-            if (dist > ArriveTol)
-            {
-                var rc = DroneUtil.FindRc(grid);
-                if (rc != null && !rc.DampenersOverride) rc.DampenersOverride = true;
-                Vector3D via; string obstacle;
-                if (_avoid.TryGetDetour(_nav, grid, standoff, out via, out obstacle)
-                    && (DateTime.UtcNow - _lastReroute).TotalSeconds >= 3.0)
-                { _lastReroute = DateTime.UtcNow; CruiseHome(grid, standoff, via); return; }
-                if ((DateTime.UtcNow - _legStart).TotalSeconds > LegTimeoutSecs) GiveUp(asset, grid, "park go-home timeout");
-                return;
-            }
-            var rc2 = DroneUtil.FindRc(grid);
-            if (rc2 != null) rc2.SetAutoPilotEnabled(false);
-            _state = PDecide; // at the base: re-evaluate (a connector may have freed up meanwhile)
+            if (_fc.Status == FlightController.VerbStatus.Failed)
+            { GiveUp(asset, grid, "park go-home: " + _fc.FailReason); return; }
+            if (_fc.Status != FlightController.VerbStatus.Done) return;
+            _state = PDecide; // at the base (core holds position): re-evaluate — a connector may have freed up
         }
 
         private void TickDock(AssetRecord asset, IMyCubeGrid grid, IMyCubeBlock core, IMyShipConnector droneCon)
@@ -156,14 +145,10 @@ namespace ColonyFramework
 
         private void TickDescend(AssetRecord asset, IMyCubeGrid grid)
         {
-            double dist = Vector3D.Distance(grid.GetPosition(), _hoverPoint);
-            if (dist > 4.0 || _nav.Speed > 0.7)
-            {
-                if ((DateTime.UtcNow - _legStart).TotalSeconds > LegTimeoutSecs) GiveUp(asset, grid, "park descend timeout");
-                return;
-            }
-            var rc = DroneUtil.FindRc(grid);
-            if (rc != null) { rc.SetAutoPilotEnabled(false); rc.DampenersOverride = true; }
+            if (_fc.Status == FlightController.VerbStatus.Failed)
+            { GiveUp(asset, grid, "park descend: " + _fc.FailReason); return; }
+            if (_fc.Status != FlightController.VerbStatus.Done) return;
+            _fc.Release(grid); // hand the actuators to the touchdown sink
             _state = PTouchdown;
             _touchStart = DateTime.UtcNow;
         }
@@ -190,6 +175,7 @@ namespace ColonyFramework
         // Power-nap: nothing draws power while parked. PrepareForFlight undoes all of this on dispatch.
         private void Nap(IMyCubeGrid grid, AssetRecord asset, bool atConnector)
         {
+            _fc.Release(grid);
             _fly.Release(grid);
             var rc = DroneUtil.FindRc(grid);
             if (rc != null) { rc.SetAutoPilotEnabled(false); rc.DampenersOverride = true; }
@@ -202,42 +188,13 @@ namespace ColonyFramework
         // Parking must never strand or hard-fail an asset: stabilize, log, cool down, try again later.
         private void GiveUp(AssetRecord asset, IMyCubeGrid grid, string reason)
         {
+            _fc.Release(grid);
             _fly.Release(grid);
             var rc = DroneUtil.FindRc(grid);
             if (rc != null) { rc.SetAutoPilotEnabled(false); rc.DampenersOverride = true; }
             _retryAt = DateTime.UtcNow.AddSeconds(RetryCooldownSecs);
             _state = PDecide;
             Log(asset, "parking attempt failed (" + reason + "), retrying in " + (int)RetryCooldownSecs + "s");
-        }
-
-        private void CruiseHome(IMyCubeGrid grid, Vector3D target, Vector3D? via = null)
-        {
-            var rc = DroneUtil.FindRc(grid);
-            if (rc == null) return;
-            rc.DampenersOverride = true;
-            rc.ClearWaypoints();
-            Vector3D pos = grid.GetPosition();
-            double agl;
-            Vector3D up = _nav.Valid ? _nav.GravityUp : Vector3D.Up;
-            if (DroneUtil.TryGetAltitude(grid, out agl) && agl < CruiseAltitudeAgl)
-                rc.AddWaypoint(MinerController.ClimbPoint(pos, target, up, CruiseAltitudeAgl - agl), "climb to cruise");
-            if (via.HasValue) rc.AddWaypoint(via.Value, "avoid detour");
-            rc.AddWaypoint(target, "park: base standoff");
-            rc.FlightMode = FlightMode.OneWay;
-            rc.SpeedLimit = HomeSpeed;
-            rc.SetAutoPilotEnabled(true);
-        }
-
-        private void FlyTo(IMyCubeGrid grid, Vector3D target, float speed, string label)
-        {
-            var rc = DroneUtil.FindRc(grid);
-            if (rc == null) return;
-            rc.DampenersOverride = true;
-            rc.ClearWaypoints();
-            rc.AddWaypoint(target, label);
-            rc.FlightMode = FlightMode.OneWay;
-            rc.SpeedLimit = speed;
-            rc.SetAutoPilotEnabled(true);
         }
 
         private void Log(AssetRecord asset, string msg)

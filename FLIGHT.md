@@ -10,8 +10,10 @@ against it; any model (Fable, Opus) in any session resumes from it. Rules of use
   them (one log line proving the value is sane). Claims marked `[proven]` are already validated
   by this project's test rounds — do not re-litigate them.
 - ALL existing flight code is FROZEN until its convert chunk. No more patches to the old paths.
-- CONVERT STATUS: WELDER converted at F4.1 (flies the new core). MINER, SURVEY, PARKER still frozen
-  on legacy paths — their converts are F4.2/F4.3.
+- CONVERT STATUS: ALL consumers converted — welder (F4.1), miner incl. 115 m eject excursion (F4.2),
+  survey + parker (F4.3). Remaining legacy flight: the two DOCK machines (proven; F5 wraps them as a
+  verb) and the miner's bore machine (proven direct control, stays by design). AvoidanceProbe and
+  the autopilot cruise helpers are now unreferenced outside dock recovery — delete with F5.
 
 ---
 

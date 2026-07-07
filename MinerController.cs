@@ -138,9 +138,8 @@ namespace ColonyFramework
         private const double YieldEps           = 1.0;  // min target-ore amount gain that counts as "still hitting ore"
         private const double YieldDepthWindow   = 2.0;  // m drilled past the known ore depth with no ore gain = exhausted, stop the bore
         private const double MaxBoreDepth       = 60.0; // hard per-bore depth cap (safety; replaces the old fixed-depth stop)
-        private const double DumpHoldSecs       = 45.0; // max dump time (8s never emptied a full cargo — "hold timeout" loops)
-        private const double EjectOffset        = 15.0; // m sideways from the shaft before opening the connector
-        private const double ResumeCargoFrac    = 0.35; // dump until cargo is below this — working room beats a perfect empty
+        private const double DumpHoldSecs       = 90.0; // dump-ALL-junk cap (all-connector throw; user spec: everything goes)
+        private const double EjectOffset        = 115.0; // m from the shaft before dumping (user spec: >100 m, junk never lands near the hole)
         private const double BoreTimeoutSeconds = 600;  // ceiling = 10-min runtime floor
         private const double AlignmentMinDot    = 0.7;
         private const double StuckDistance      = 1.0;
@@ -204,7 +203,9 @@ namespace ColonyFramework
         private bool _reentering;      // returning down the same shaft after a dump (resume drilling, keep _boreContact)
         private double _ejectResumePen;// depth we left the bore at, to descend back to
         private DateTime _ejectHoldStart; // when the dump hold began
-        private bool _ejectMovedOut;   // slid clear of the shaft before opening the connector
+        private int _ejectPhase;       // eject excursion: 0=start 1=flying out 2=dumping 3=flying back
+        private readonly FlightController _fc = new FlightController(); // F4.2: flight legs on the new core
+        private readonly OrbitNav _orbitTerrain = new OrbitNav();       // terrain pin for the dump point
         private double _yieldRefPen;   // deepest pen at which target ore was still being collected this bore
         private double _yieldRefAmt;   // target-ore amount in cargo at that point (yield-stall detection)
         private bool _depositExhausted;// true once the whole + is mined out → deplete (else release for another pass)
@@ -233,6 +234,9 @@ namespace ColonyFramework
                     case PhaseRetreat:    TickRetreating(colony, m, deposit, grid); break;
                     case PhaseDock:       TickDock(colony, m, deposit, grid); break;
                 }
+                // ONE actuator owner (FLIGHT.md §5.1): pump the flight core. It is Released (no-op)
+                // whenever the bore machine or the dock machine owns the actuators.
+                _fc.Tick(grid);
             }
             catch (Exception e)
             {
@@ -399,7 +403,8 @@ namespace ColonyFramework
         {
             DroneUtil.PrepareForFlight(grid); // batteries auto + thrusters/gyros on + unlock (leak-proof launch)
             Vector3D standoff = NavMath.ComputeStandoff(deposit.Position, grid.GetPosition());
-            EngageCruise(grid, standoff, CruiseSpeedLimit, "Deposit " + deposit.Id + " standoff");
+            _fc.ClearWorkVolumes();
+            _fc.Transit(grid, FlightCorridor.Plan(grid.GetPosition(), standoff, _fc.Profile.CruiseAgl), CruiseSpeedLimit);
         }
 
         // Climb-then-cruise RC route used for the long transit/return legs: climb STRAIGHT UP to a
@@ -440,41 +445,14 @@ namespace ColonyFramework
 
         private void TickTransit(Colony colony, Mission m, DepositRecord deposit, IMyCubeGrid grid)
         {
-            Vector3D standoff = NavMath.ComputeStandoff(deposit.Position, grid.GetPosition());
-            double dist = Vector3D.Distance(grid.GetPosition(), standoff);
-
-            if (dist > ArriveDistance)
-            {
-                // Dampeners MUST stay on so autopilot can brake at the waypoint (off = flies past
-                // forever). Set true only when it's actually off, so we heal a poisoned/resumed
-                // drone without writing the property every tick (which fights autopilot).
-                var rc2 = DroneUtil.FindRc(grid);
-                if (rc2 != null && !rc2.DampenersOverride) rc2.DampenersOverride = true;
-                if (rc2 != null) rc2.SpeedLimit = CruiseSpeed(colony, grid.GetPosition(), standoff); // fast in open air, slow near base/deposit
-                if (NeedsClimb(grid, m, "transit")) { EngageTransit(grid, deposit); return; } // active ground avoidance
-                // Reactive obstacle avoidance: if the corridor ahead is blocked (terrain rise / another
-                // grid), re-issue the route through a detour point. Same throttle as NeedsClimb; the
-                // probe is stateless — next ticks re-sense and the unbiased route resumes when clear.
-                Vector3D via; string obstacle;
-                if (_avoid.TryGetDetour(_nav, grid, standoff, out via, out obstacle)
-                    && (DateTime.UtcNow - _lastGroundAvoid).TotalSeconds >= ClimbReengageSecs)
-                {
-                    _lastGroundAvoid = DateTime.UtcNow;
-                    EngageCruise(grid, standoff, CruiseSpeedLimit, "Deposit " + deposit.Id + " standoff", via);
-                    MyLog.Default.WriteLineAndConsole(string.Format(
-                        "[ColonyFramework] Mission {0}: deflected around obstacle {1} at ({2:F0}, {3:F0}, {4:F0}), resumed heading",
-                        m.Id, obstacle, via.X, via.Y, via.Z));
-                    return;
-                }
-                Narrate(m, "transit", standoff);
-                string fail = LegOk(dist, TransitTimeoutSecs, "transit");
-                if (fail != null) RetryOrFail(colony, m, deposit, grid, fail);
-                return; // still flying (or retrying)
-            }
+            // F4.2: the corridor + steering own this leg entirely.
+            if (_fc.Status == FlightController.VerbStatus.Failed)
+            { RetryOrFail(colony, m, deposit, grid, "transit: " + _fc.FailReason); return; }
+            if (_fc.Status != FlightController.VerbStatus.Done)
+            { Narrate(m, "transit", NavMath.ComputeStandoff(deposit.Position, grid.GetPosition())); return; }
 
             _retries = 0; // arrived — forward progress
-            var rc = DroneUtil.FindRc(grid);
-            if (rc != null) rc.SetAutoPilotEnabled(false);
+            _fc.Release(grid); // hand the actuators to the bore machine — one owner at a time
             m.Phase = PhaseStartBore;
             MyLog.Default.WriteLineAndConsole(string.Format(
                 "[ColonyFramework] Mission {0}: '{1}' arrived at deposit {2}, starting bore",
@@ -520,6 +498,7 @@ namespace ColonyFramework
         {
             if (grid == null) return;
             _bore.Release(grid);
+            _fc.Release(grid);
             DroneUtil.SetDrills(grid, false);
             DroneUtil.SetThrowOut(grid, false); // never let a dump leak into recovery/dock (it would throw ORE)
             DroneUtil.SetBatteriesRecharge(grid, false);  // a recovering hover NEEDS battery output
@@ -758,7 +737,7 @@ namespace ColonyFramework
                         // Cargo is clogged with ice/stone — back out, dump it, re-enter THIS shaft.
                         _ejectResumePen = Vector3D.Dot(pos - _boreContact, downDir);
                         _ejecting = true;
-                        _ejectMovedOut = false; // each eject re-does the slide-off-shaft before dumping
+                        _ejectPhase = 0; // fresh excursion each eject
                         _boreSub = BoreAscend;
                         _subStart = DateTime.UtcNow;
                         ResetAscend();
@@ -823,56 +802,60 @@ namespace ColonyFramework
                     }
                 }
             }
-            else // BoreEjectDump
+            else // BoreEjectDump — F4.2 excursion (user spec): level out, fly ≥110 m away, dump ALL junk, return
             {
-                // MOVE AWAY FIRST: dumping while hovering over the shaft rains the junk straight back
-                // into the bore (seen in testing: the drone couldn't re-enter its own hole and got
-                // stuck on its own ejected ice). Slide ~15 m to the side, THEN open the connector.
-                if (!_ejectMovedOut)
+                if (_ejectPhase == 0) // fly out (the flight core levels the drone and flies — "after leveled")
                 {
                     Vector3D away = pos - deposit.Position;
                     Vector3D lateral = away - downDir * Vector3D.Dot(away, downDir);
                     if (lateral.LengthSquared() < 1.0) lateral = Vector3D.CalculatePerpendicularVector(downDir);
                     lateral = Vector3D.Normalize(lateral);
-                    Vector3D horizFromShaft = pos - deposit.Position - downDir * Vector3D.Dot(pos - deposit.Position, downDir);
-                    if (horizFromShaft.Length() >= EjectOffset)
-                    {
-                        _ejectMovedOut = true;
-                        _ejectHoldStart = DateTime.UtcNow; // dump clock starts once we're clear
-                        double tf0, jf0, ta0;
-                        DroneUtil.OreFill(grid, deposit.OreType, out tf0, out jf0, out ta0);
-                        MyLog.Default.WriteLineAndConsole(string.Format(
-                            "[ColonyFramework] Mission {0}: eject — clear of shaft ({1:F0} m out), dumping (cargo {2:P0}, junk {3:P0})",
-                            m.Id, EjectOffset, tf0, jf0));
-                    }
-                    else
-                    {
-                        _bore.Drive(grid, drillFwd, downDir, 0);            // hold nose-down; dampers hold altitude
-                        _bore.ThrustAlong(grid, lateral, RepoSpeed);        // slide sideways off the shaft
-                        return;
-                    }
-                }
-
-                _bore.Drive(grid, drillFwd, downDir, 0); // hold position (dampers brake) beside the shaft
-                // All connectors throw in parallel; mission ore is evacuated from them first (never thrown).
-                double junkLeft = DroneUtil.EjectJunk(grid, deposit.OreType, true);
-                double totalNow, junkNow, tgtNow;
-                DroneUtil.OreFill(grid, deposit.OreType, out totalNow, out junkNow, out tgtNow);
-                bool roomy = totalNow < ResumeCargoFrac; // enough working room to drill productively
-                bool timedOut = (DateTime.UtcNow - _ejectHoldStart).TotalSeconds > DumpHoldSecs;
-                if (junkLeft <= 1e-3 || roomy || timedOut)
-                {
-                    // ThrowOut stays ON through the slide-back so loaded connectors keep draining on
-                    // the way; BoreDescend forces it off before re-entering the shaft.
-                    _ejecting = false;
-                    _ejectMovedOut = false;
-                    _reentering = true;
-                    _boreSub = BoreReposition;   // re-centre over the same + spot, then descend back in
-                    _subStart = DateTime.UtcNow;
+                    Vector3D up = -downDir;
+                    Vector3D dump = _orbitTerrain.PinToSurface(pos + lateral * EjectOffset, up, 25.0);
+                    _bore.Release(grid);        // bore machine hands the actuators to the flight core
+                    _fc.MoveTo(grid, dump, 25.0);
+                    _ejectPhase = 1;
                     MyLog.Default.WriteLineAndConsole(string.Format(
-                        "[ColonyFramework] Mission {0}: eject — dump done ({1}, cargo {2:P0}), re-entering shaft to {3:F1}m",
-                        m.Id, junkLeft <= 1e-3 ? "junk gone" : roomy ? "cargo room" : "45s cap", totalNow, _ejectResumePen));
+                        "[ColonyFramework] Mission {0}: eject excursion — flying {1:F0} m off the shaft to dump", m.Id, EjectOffset));
+                    return;
                 }
+                if (_ejectPhase == 1) // en route to the dump point
+                {
+                    if (_fc.Status == FlightController.VerbStatus.Failed) { BeginRetreat(m, grid, "eject flight: " + _fc.FailReason); return; }
+                    if (_fc.Status != FlightController.VerbStatus.Done) return;
+                    _ejectPhase = 2;
+                    _ejectHoldStart = DateTime.UtcNow;
+                    return;
+                }
+                if (_ejectPhase == 2) // hovering at the dump point: throw until ALL junk is gone
+                {
+                    double junkLeft = DroneUtil.EjectJunk(grid, deposit.OreType, true); // all connectors; ore evacuated first
+                    if (junkLeft <= 1e-3 || (DateTime.UtcNow - _ejectHoldStart).TotalSeconds > DumpHoldSecs)
+                    {
+                        DroneUtil.SetThrowOut(grid, false);
+                        double tf, jf, ta;
+                        DroneUtil.OreFill(grid, deposit.OreType, out tf, out jf, out ta);
+                        Vector3D aboveShaft = _boreContact - downDir * ClearanceAlt; // the point above THIS shaft's mouth
+                        _fc.MoveTo(grid, aboveShaft, 20.0);
+                        _ejectPhase = 3;
+                        MyLog.Default.WriteLineAndConsole(string.Format(
+                            "[ColonyFramework] Mission {0}: eject excursion — dumped ({1}, cargo {2:P0}), returning to the same bore",
+                            m.Id, junkLeft <= 1e-3 ? "ALL junk gone" : "cap hit", tf));
+                    }
+                    return;
+                }
+                // _ejectPhase == 3: flying back above the shaft mouth
+                if (_fc.Status == FlightController.VerbStatus.Failed) { BeginRetreat(m, grid, "eject return: " + _fc.FailReason); return; }
+                if (_fc.Status != FlightController.VerbStatus.Done) return;
+                _fc.Release(grid);            // hand the actuators back to the bore machine
+                _ejecting = false;
+                _ejectPhase = 0;
+                _reentering = true;
+                _boreSub = BoreReposition;    // re-centre over the same + spot, then descend back in
+                _subStart = DateTime.UtcNow;
+                MyLog.Default.WriteLineAndConsole(string.Format(
+                    "[ColonyFramework] Mission {0}: eject excursion — back over the shaft, re-entering to {1:F1}m",
+                    m.Id, _ejectResumePen));
             }
 
             // Stuck watchdog (real-hang safety): reset whenever the drone moves > StuckDistance.
@@ -880,7 +863,7 @@ namespace ColonyFramework
             // hold of up to DumpHoldSecs (45 s) — longer than StuckSeconds (20 s) — so without this
             // exemption the watchdog would abort every full-cargo dump mid-way. The slide-out phase
             // (still moving off the shaft) stays watched, so a drone that truly can't move is caught.
-            if (_ejecting && _ejectMovedOut)
+            if (_ejecting)
             {
                 _progressPos = pos;              // keep the clock fresh so resuming the bore isn't instantly "stuck"
                 _progressTime = DateTime.UtcNow;
@@ -966,6 +949,8 @@ namespace ColonyFramework
             if (con != null) con.ThrowOut = false; // never throw out valuable ore on the way home / at base
             ResetAscend();
             DroneUtil.SetThrowOut(grid, false); // a retreat can interrupt a dump — never climb the shaft throwing into it
+            _fc.Release(grid); // a retreat can interrupt an eject excursion — bore machine takes the actuators
+            _ejectPhase = 0;
             _retreatSub = RetreatAscend;
             m.Phase = PhaseRetreat;
             MyLog.Default.WriteLineAndConsole(string.Format(
@@ -1061,42 +1046,14 @@ namespace ColonyFramework
                 return;
             }
 
-            // RetreatReturn: RC autopilot flies to the colony-core standoff, then we let dampeners
-            // bring it to a FULL STOP before docking — disabling dampeners while still moving fast
-            // sends it coasting into the ground.
-            Vector3D coreStandoff;
-            if (!TryCoreStandoff(colony, out coreStandoff)) { CompleteMission(colony, m, grid); return; }
-            double rdist = Vector3D.Distance(pos, coreStandoff);
-            if (rdist > ArriveDistance)
-            {
-                var rcd = DroneUtil.FindRc(grid);
-                if (rcd != null && !rcd.DampenersOverride) rcd.DampenersOverride = true; // heal only if off (autopilot needs it to brake)
-                if (rcd != null) rcd.SpeedLimit = CruiseSpeed(colony, pos, coreStandoff); // fast in open air, slow near base
-                if (NeedsClimb(grid, m, "return")) { EngageReturn(colony, grid); return; } // active ground avoidance
-                Vector3D rvia; string robstacle;
-                if (_avoid.TryGetDetour(_nav, grid, coreStandoff, out rvia, out robstacle)
-                    && (DateTime.UtcNow - _lastGroundAvoid).TotalSeconds >= ClimbReengageSecs)
-                {
-                    _lastGroundAvoid = DateTime.UtcNow;
-                    EngageCruise(grid, coreStandoff, CruiseSpeedLimit, "Colony core standoff", rvia);
-                    MyLog.Default.WriteLineAndConsole(string.Format(
-                        "[ColonyFramework] Mission {0}: deflected around obstacle {1} at ({2:F0}, {3:F0}, {4:F0}), resumed heading",
-                        m.Id, robstacle, rvia.X, rvia.Y, rvia.Z));
-                    return;
-                }
-                Narrate(m, "return", coreStandoff);
-                string fail = LegOk(rdist, ReturnTimeoutSecs, "return");
-                if (fail != null) RetryOrFail(colony, m, deposit, grid, fail);
-                return; // still flying home (or retrying)
-            }
+            // RetreatReturn (F4.2): the flight core flies the corridor home; arrival latch means we
+            // are already stopped and holding at the standoff when Done — dock immediately.
+            if (_fc.Status == FlightController.VerbStatus.Failed)
+            { RetryOrFail(colony, m, deposit, grid, "return: " + _fc.FailReason); return; }
+            if (_fc.Status != FlightController.VerbStatus.Done)
+            { Vector3D cs; if (TryCoreStandoff(colony, out cs)) Narrate(m, "return", cs); return; }
             _retries = 0; // reached the core standoff — forward progress
-
-            var rc = DroneUtil.FindRc(grid);
-            if (rc != null) rc.SetAutoPilotEnabled(false); // dampeners stay ON and brake it to a hover
-
-            double speed = grid.Physics != null ? grid.Physics.LinearVelocity.Length() : 0;
-            if (speed > DockSettleSpeed) return; // wait until stopped (dampeners holding) before dampeners-off dock
-
+            _fc.Release(grid); // hand the actuators to the dock machine — one owner at a time
             BeginDock(colony, m, grid, pos);
         }
 
@@ -1191,7 +1148,8 @@ namespace ColonyFramework
             Vector3D standoff;
             if (!TryCoreStandoff(colony, out standoff)) return false;
             if (DroneUtil.FindRc(grid) == null) return false;
-            EngageCruise(grid, standoff, CruiseSpeedLimit, "Colony core standoff");
+            _fc.ClearWorkVolumes();
+            _fc.Transit(grid, FlightCorridor.Plan(grid.GetPosition(), standoff, _fc.Profile.CruiseAgl), CruiseSpeedLimit);
             return true;
         }
 
@@ -1235,6 +1193,7 @@ namespace ColonyFramework
         private void CompleteMission(Colony colony, Mission m, IMyCubeGrid grid)
         {
             _bore.Release(grid);
+            if (grid != null) _fc.Release(grid); // flight core → dampeners, the terminal safety net
             if (_cons != null && grid != null) _cons.Release(grid.EntityId);
             DroneUtil.SetBatteriesRecharge(grid, false); // never leave Recharge leaked into idle
             var rc = DroneUtil.FindRc(grid);
@@ -1592,8 +1551,7 @@ namespace ColonyFramework
             if (grid != null)
             {
                 _bore.Release(grid);
-                var rc = DroneUtil.FindRc(grid);
-                if (rc != null) rc.SetAutoPilotEnabled(false);
+                _fc.Release(grid);
                 DroneUtil.SetDrills(grid, false);
             }
             FailMission(colony, m, grid, "aborted by command");

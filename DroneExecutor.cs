@@ -16,6 +16,7 @@ namespace ColonyFramework
         private readonly Dictionary<long, SurveyController> _surveys = new Dictionary<long, SurveyController>();
         private readonly Dictionary<long, ParkController> _parkers = new Dictionary<long, ParkController>(); // by ASSET id
         private readonly ConnectorReservations _cons = new ConnectorReservations(); // fleet connector traffic control
+        private readonly Dictionary<long, FlightTest> _flightTests = new Dictionary<long, FlightTest>(); // by grid id (F1 harness)
         private readonly WeldCoordinator _weldCoord = new WeldCoordinator(); // multi-welder block claims + bubbles
         private readonly BoreController _bore = new BoreController(); // for ReleaseControls only
         private readonly List<long> _stale = new List<long>();
@@ -71,6 +72,30 @@ namespace ColonyFramework
             for (int i = 0; i < _stale.Count; i++) _surveys.Remove(_stale[i]);
 
             TickParkers(colony);
+            TickFlightTests();
+        }
+
+        // F1 acceptance harness: /colony flighttest runs a pad→point→pad loop on the new
+        // FlightController without touching any frozen mission path. Parker skips tested grids.
+        public bool BeginFlightTest(IMyCubeGrid grid, double dist)
+        {
+            if (grid == null || _flightTests.ContainsKey(grid.EntityId)) return false;
+            _flightTests[grid.EntityId] = new FlightTest(grid, dist);
+            return true;
+        }
+
+        private void TickFlightTests()
+        {
+            if (_flightTests.Count == 0) return;
+            _stale.Clear();
+            foreach (var kv in _flightTests)
+            {
+                var grid = MyAPIGateway.Entities.GetEntityById(kv.Key) as IMyCubeGrid;
+                if (grid == null) { _stale.Add(kv.Key); continue; }
+                kv.Value.Tick(grid);
+                if (kv.Value.Done) _stale.Add(kv.Key);
+            }
+            for (int i = 0; i < _stale.Count; i++) _flightTests.Remove(_stale[i]);
         }
 
         // Idle drones get parked (dock-recharge or land-nearby + power-nap) instead of hovering
@@ -85,6 +110,7 @@ namespace ColonyFramework
             {
                 var a = assets[i];
                 if (a.Status != AssetStatus.Idle) continue;
+                if (_flightTests.ContainsKey(a.EntityId)) continue; // under F1 test: parker dropped, re-decides after
                 var grid = MyAPIGateway.Entities.GetEntityById(a.EntityId) as IMyCubeGrid;
                 if (grid == null) continue;
                 _stale.Remove(a.EntityId);

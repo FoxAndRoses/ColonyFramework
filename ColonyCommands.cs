@@ -27,6 +27,7 @@ namespace ColonyFramework
             "/colony build — projector blueprint vs stock (missing parts)",
             "/colony status — live mission/drone status, power, survey coverage",
             "/colony name <name> — rename the colony (LCDs/dashboard use it)",
+            "/colony flighttest [50-500] — nearest idle drone flies out-and-back on the new flight core",
             "/colony dispatch — enable autonomous mining",
             "/colony abort — stop all missions",
             "/colony recall — bring drones home",
@@ -189,6 +190,33 @@ namespace ColonyFramework
                 MyAPIGateway.Utilities.ShowMessage("Colony", string.Format(
                     "registered '{0}' as {1} ({2} assets total)", nearest.DisplayName,
                     type == AssetType.Welder ? "welder" : "miner", colony.Assets.Assets.Count));
+                return;
+            }
+
+            if (text == "/colony flighttest" || text.StartsWith("/colony flighttest "))
+            {
+                double dist = 150;
+                var parts = text.Split(' ');
+                if (parts.Length >= 3) double.TryParse(parts[2], out dist);
+                var player = MyAPIGateway.Session.Player;
+                if (player == null) { MyAPIGateway.Utilities.ShowMessage("Colony", "no player context"); return; }
+                var ppos = player.GetPosition();
+                IMyCubeGrid best = null; double bestSq = double.MaxValue;
+                var roster = colony.Assets.Assets;
+                for (int i = 0; i < roster.Count; i++)
+                {
+                    if (roster[i].Status != AssetStatus.Idle) continue;
+                    var g = MyAPIGateway.Entities.GetEntityById(roster[i].EntityId) as IMyCubeGrid;
+                    if (g == null) continue;
+                    double sq = VRageMath.Vector3D.DistanceSquared(g.GetPosition(), ppos);
+                    if (sq < bestSq) { bestSq = sq; best = g; }
+                }
+                if (best == null) { MyAPIGateway.Utilities.ShowMessage("Colony", "no idle registered drone available"); return; }
+                if (_executor.BeginFlightTest(best, dist))
+                    MyAPIGateway.Utilities.ShowMessage("Colony", string.Format(
+                        "flight test: '{0}' flying {1:F0} m out and back on the new flight core", best.DisplayName, dist));
+                else
+                    MyAPIGateway.Utilities.ShowMessage("Colony", "that drone is already flight-testing");
                 return;
             }
 

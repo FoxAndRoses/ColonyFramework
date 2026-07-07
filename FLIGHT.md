@@ -111,10 +111,12 @@ Design rules:
 - **Braking-aware speed is the "fast vs slow" answer:** `v* = sqrt(2·aBrake·dist)` means a ship
   with weak thrust automatically approaches slowly and a strong one flies fast — no speed
   constants per phase. `aBrake` comes from ShipSelfModel per axis, derated ×0.7 safety.
-- **Gravity feedforward:** when dampeners are ON they already cancel gravity — feedforward only
-  applies on axes we override. Simplest correct scheme: leave dampeners ON always; overrides ADD
-  motion on top; deadband returns axes to dampener control. (This is how the proven dock reverse
-  and bore already behave — generalized.)
+- **Gravity feedforward & dampeners (CORRECTED at F1):** dampeners counter-thrust against ALL
+  velocity — including velocity we commanded — so they fight overrides harder the faster we fly
+  (fine at the dock's 0.25–2 m/s creeps, crippling at cruise). Rule: dampeners are OFF while a
+  translation verb actively controls (the verb applies full gravity feedforward `F += −m·g`), and
+  ON for Hover-idle, verb completion, Release, and every failure path (dampeners are the safety
+  net — any abnormal exit restores them). This matches PAM/SAM practice.
 - **Deadbands + hysteresis kill jitter:** no override changes below force epsilon; arrival state
   latches (§5.4) instead of flickering.
 - **Attitude:** reuse `BoreController.Face` (damped, proven). The velocity loop must work at ANY

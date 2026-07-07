@@ -19,5 +19,6 @@ namespace ColonyFramework
         [ProtoMember(6)] public string Name;
         [ProtoMember(7)] public int OfflineTicks; // incremented each validation tick while entity missing; removed at threshold
         [ProtoMember(8)] public bool AutoDispatchEnabled; // true = colony may auto-launch this drone's missions (set by /colony dispatch; cleared by abort/recall)
+        [ProtoMember(9)] public string CapabilitySummary; // ShipSelfModel one-liner from the last commissioning self-test (FLIGHT.md §4)
     }
 }

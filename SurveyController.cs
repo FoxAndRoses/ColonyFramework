@@ -94,6 +94,19 @@ namespace ColonyFramework
         private void TickCommission(Colony colony, Mission m, IMyCubeGrid grid, VRage.Game.ModAPI.IMyCubeBlock core)
         {
             if (DroneUtil.FindOreDetector(grid) == null) { Fail(colony, m, grid, "no working ore detector"); return; }
+            // FLIGHT.md §4 static capability gates (measured hop lands with the survey F4 convert).
+            var model = ShipSelfModel.Build(grid);
+            string deficiency = model == null ? "no remote control / physics" : model.Deficiency();
+            if (deficiency != null)
+            {
+                if (!MyAPIGateway.Utilities.IsDedicated)
+                    MyAPIGateway.Utilities.ShowMessage("Colony", string.Format(
+                        "'{0}' self-test FAILED: {1}", grid.DisplayName, deficiency));
+                Fail(colony, m, grid, "self-test FAIL: " + deficiency);
+                return;
+            }
+            var asset = colony.Assets.GetByEntityId(m.AssignedAssetId);
+            if (asset != null) asset.CapabilitySummary = model.Summary();
             DroneUtil.PrepareForFlight(grid);
             if (colony.State.SurveyedRadius <= 0) colony.State.SurveyedRadius = FirstRing;
             Log(m, string.Format("survey start{0} — ring {1:F0} m at {2:F0}°",

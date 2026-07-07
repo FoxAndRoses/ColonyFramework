@@ -207,6 +207,10 @@ namespace ColonyFramework
                 }
                 MyAPIGateway.Utilities.ShowMessage("Colony", string.Format(
                     "assets: {0} (idle {1}, assigned {2}, offline {3})", a.Count, idle, assigned, offline));
+                for (int i = 0; i < a.Count && i < 8; i++)
+                    MyAPIGateway.Utilities.ShowMessage("Colony", string.Format(
+                        "  {0} [{1}] — {2}", a[i].Name, a[i].Status,
+                        string.IsNullOrEmpty(a[i].CapabilitySummary) ? "not yet self-tested" : a[i].CapabilitySummary));
                 return;
             }
 

@@ -141,7 +141,21 @@ namespace ColonyFramework
         {
             if (DroneUtil.FindWelders(grid).Count == 0) { Fail(colony, m, grid, "no welders on drone"); return; }
             if (DroneUtil.FindConnector(grid) == null) { Fail(colony, m, grid, "no connector on drone"); return; }
-            Log(m, "commissioned (welder), heading to load components");
+            // FLIGHT.md §4 static capability gates (named deficiency). The measured hop runs at the
+            // welder's F4 convert — commissioning here may start DOCKED, where a hop is impossible.
+            var model = ShipSelfModel.Build(grid);
+            string deficiency = model == null ? "no remote control / physics" : model.Deficiency();
+            if (deficiency != null)
+            {
+                if (!MyAPIGateway.Utilities.IsDedicated)
+                    MyAPIGateway.Utilities.ShowMessage("Colony", string.Format(
+                        "'{0}' self-test FAILED: {1}", grid.DisplayName, deficiency));
+                Fail(colony, m, grid, "self-test FAIL: " + deficiency);
+                return;
+            }
+            var asset = colony.Assets.GetByEntityId(m.AssignedAssetId);
+            if (asset != null) asset.CapabilitySummary = model.Summary();
+            Log(m, string.Format("commissioned (welder) — {0}; heading to load components", model.Summary()));
             BeginDockLoad(colony, m, grid);
         }
 

@@ -267,9 +267,38 @@ namespace ColonyFramework
         }
 
         // ── Commission: spike ALL thrusters + drills, measure the power draw, decide if the drone can
-        // run, and derive how much it must recharge after each mission (higher draw → higher target). ──
+        // run, and derive how much it must recharge after each mission (higher draw → higher target).
+        // Then the FLIGHT.md §4 self-test: static capability gates (named deficiency on failure) and
+        // a short measured hop that compares real lift against the ShipSelfModel's prediction. ──
+        private ShipSelfModel _selfModel;
+        private LaunchSelfTest _selfTest;
+
         private void TickCommission(Colony colony, Mission m, DepositRecord deposit, IMyCubeGrid grid)
         {
+            // Self-test hop in progress: pump it to completion, then dispatch or fail with the reason.
+            if (_selfTest != null)
+            {
+                _selfTest.Tick(grid, _selfModel);
+                if (!_selfTest.Done) return;
+                if (_selfTest.Passed)
+                {
+                    MyLog.Default.WriteLineAndConsole(string.Format(
+                        "[ColonyFramework] Mission {0}: self-test PASS — lift {1:F1} m/s² measured; {2}",
+                        m.Id, _selfTest.MeasuredAccel, _selfModel.Summary()));
+                    EngageTransit(grid, deposit);
+                    m.Phase = PhaseTransit;
+                }
+                else
+                {
+                    if (!MyAPIGateway.Utilities.IsDedicated)
+                        MyAPIGateway.Utilities.ShowMessage("Colony", string.Format(
+                            "'{0}' self-test FAILED: {1}", grid.DisplayName, _selfTest.FailReason));
+                    FailMission(colony, m, grid, "self-test FAIL: " + _selfTest.FailReason);
+                }
+                _selfTest = null;
+                return;
+            }
+
             if (!_commissionStarted)
             {
                 _commissionStarted = true;
@@ -297,10 +326,9 @@ namespace ColonyFramework
                 // across the pad; fall back to the floor recharge target.
                 _requiredChargePct = ChargeFloorPct;
                 MyLog.Default.WriteLineAndConsole(string.Format(
-                    "[ColonyFramework] Mission {0}: commissioned (no anchor — load test skipped, recharge target {1:F0}%), dispatching",
+                    "[ColonyFramework] Mission {0}: commissioned (no anchor — load test skipped, recharge target {1:F0}%), self-testing",
                     m.Id, _requiredChargePct * 100));
-                EngageTransit(grid, deposit);
-                m.Phase = PhaseTransit;
+                BeginSelfTest(colony, m, grid);
                 return;
             }
 
@@ -317,18 +345,42 @@ namespace ColonyFramework
             if (hasReactor || runtimeMin >= MinRuntimeMinutes)
             {
                 MyLog.Default.WriteLineAndConsole(string.Format(
-                    "[ColonyFramework] Mission {0}: commissioned: draw ~{1:F2} MW (reactor {2:F2}, battery {3:F2}); {4} recharge target {5:F0}%, dispatching",
+                    "[ColonyFramework] Mission {0}: commissioned: draw ~{1:F2} MW (reactor {2:F2}, battery {3:F2}); {4} recharge target {5:F0}%, self-testing",
                     m.Id, drawMw, reactorOut, batOut,
                     hasReactor ? "reactor power," : string.Format("~{0:F0} min runtime,", runtimeMin),
                     _requiredChargePct * 100));
-                EngageTransit(grid, deposit);
-                m.Phase = PhaseTransit;
+                BeginSelfTest(colony, m, grid);
             }
             else
             {
                 FailMission(colony, m, grid, string.Format(
                     "insufficient runtime ({0:F1} min < {1:F0}) — staying idle", runtimeMin, MinRuntimeMinutes));
             }
+        }
+
+        // FLIGHT.md §4: build the ShipSelfModel, run the static capability gates (abort with a NAMED
+        // deficiency), record the capability summary on the asset, then unlock and start the measured
+        // hop. TickCommission's pump completes it and dispatches on pass.
+        private void BeginSelfTest(Colony colony, Mission m, IMyCubeGrid grid)
+        {
+            _selfModel = ShipSelfModel.Build(grid);
+            string deficiency = _selfModel == null ? "no remote control / physics" : _selfModel.Deficiency();
+            if (deficiency != null)
+            {
+                if (!MyAPIGateway.Utilities.IsDedicated)
+                    MyAPIGateway.Utilities.ShowMessage("Colony", string.Format(
+                        "'{0}' self-test FAILED: {1}", grid.DisplayName, deficiency));
+                FailMission(colony, m, grid, "self-test FAIL: " + deficiency);
+                return;
+            }
+            var asset = colony.Assets.GetByEntityId(m.AssignedAssetId);
+            if (asset != null) asset.CapabilitySummary = _selfModel.Summary();
+            MyLog.Default.WriteLineAndConsole(string.Format(
+                "[ColonyFramework] Mission {0}: self-test static gates pass — {1}; measuring lift",
+                m.Id, _selfModel.Summary()));
+            DroneUtil.PrepareForFlight(grid); // unlock for the hop (batteries auto, thrusters on)
+            _selfTest = new LaunchSelfTest();
+            _selfTest.Begin(grid, _selfModel);
         }
 
         // How charged the drone must be before its next dispatch, from the self-test: the battery's

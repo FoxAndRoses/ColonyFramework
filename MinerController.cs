@@ -152,7 +152,6 @@ namespace ColonyFramework
 
         private readonly BoreController _bore = new BoreController();
         private readonly NavState _nav = new NavState(); // situational awareness, refreshed each tick
-        private readonly AvoidanceProbe _avoid = new AvoidanceProbe(); // reactive obstacle sensing (transit legs)
 
         private bool _started; // first Advance seen (distinguishes a fresh/resumed controller)
         private bool _commissionStarted;
@@ -407,41 +406,6 @@ namespace ColonyFramework
             _fc.Transit(grid, FlightCorridor.Plan(grid.GetPosition(), standoff, _fc.Profile.CruiseAgl), CruiseSpeedLimit);
         }
 
-        // Climb-then-cruise RC route used for the long transit/return legs: climb STRAIGHT UP to a
-        // safe cruise altitude first (if below it), then fly diagonally to the high standoff — so the
-        // drone never skims terrain on a straight A→B line. RC autopilot can climb up and descend
-        // diagonally fine; it just can't pitch straight down, so the route never ends straight below.
-        private void EngageCruise(IMyCubeGrid grid, Vector3D target, float speed, string label, Vector3D? via = null)
-        {
-            var rc = DroneUtil.FindRc(grid);
-            if (rc == null) return;
-            rc.DampenersOverride = true; // autopilot needs dampeners to brake (also heals a drone left off)
-            rc.ClearWaypoints();
-            Vector3D pos = grid.GetPosition();
-            double agl;
-            if (DroneUtil.TryGetAltitude(grid, out agl) && agl < CruiseAltitudeAgl)
-                rc.AddWaypoint(ClimbPoint(pos, target, Up(pos), CruiseAltitudeAgl - agl), "climb to cruise");
-            if (via.HasValue) rc.AddWaypoint(via.Value, "avoid detour"); // one transient detour point — re-derived each probe, never stored
-            rc.AddWaypoint(target, label);
-            rc.FlightMode = FlightMode.OneWay;
-            rc.SpeedLimit = speed;
-            rc.SetAutoPilotEnabled(true);
-            ResetLeg();
-        }
-
-        // Active ground avoidance for autopilot legs: a straight/diagonal route between points of
-        // different elevation can still dip toward terrain. If the drone is mid-cruise below the
-        // floor AGL, signal the caller to re-engage the climb-then-cruise (throttled) so it pulls up.
-        private bool NeedsClimb(IMyCubeGrid grid, Mission m, string leg)
-        {
-            double agl;
-            if (!DroneUtil.TryGetAltitude(grid, out agl) || agl >= GroundAvoidAgl) return false;
-            if ((DateTime.UtcNow - _lastGroundAvoid).TotalSeconds < ClimbReengageSecs) return false;
-            _lastGroundAvoid = DateTime.UtcNow;
-            MyLog.Default.WriteLineAndConsole(string.Format(
-                "[ColonyFramework] Mission {0}: {1} too low ({2:F0} m AGL) — climbing", m.Id, leg, agl));
-            return true;
-        }
 
         private void TickTransit(Colony colony, Mission m, DepositRecord deposit, IMyCubeGrid grid)
         {
@@ -562,7 +526,7 @@ namespace ColonyFramework
                 case PhaseRetreat: if (EngageReturn(colony, grid)) _retreatSub = RetreatReturn; else CompleteMission(colony, m, grid); break;
                 case PhaseDock:
                     Vector3D standoff;
-                    if (TryCoreStandoff(colony, out standoff)) EngageCruise(grid, standoff, (float)DockMoveSpeed, "core standoff");
+                    if (TryCoreStandoff(colony, out standoff)) EngageAutopilot(grid, standoff); // minimal recovery hop (dock machine re-runs after)
                     _dockSub = DockRecover;
                     _dockStart = DateTime.UtcNow;
                     break;
@@ -1120,15 +1084,6 @@ namespace ColonyFramework
             return g.LengthSquared() > 0.01 ? -Vector3D.Normalize(g) : Vector3D.Up;
         }
 
-        // Climb waypoint biased ~20 m toward the destination: two drones lifting off together head
-        // for DIFFERENT climb points and diverge immediately instead of stacking in one column.
-        public static Vector3D ClimbPoint(Vector3D pos, Vector3D target, Vector3D up, double climb)
-        {
-            Vector3D toT = target - pos;
-            Vector3D horiz = toT - up * Vector3D.Dot(toT, up);
-            if (horiz.LengthSquared() > 1.0) horiz = Vector3D.Normalize(horiz) * 20.0;
-            return pos + up * climb + horiz;
-        }
 
         private void EngageAutopilot(IMyCubeGrid grid, Vector3D point)
         {

@@ -10,10 +10,11 @@ against it; any model (Fable, Opus) in any session resumes from it. Rules of use
   them (one log line proving the value is sane). Claims marked `[proven]` are already validated
   by this project's test rounds — do not re-litigate them.
 - ALL existing flight code is FROZEN until its convert chunk. No more patches to the old paths.
-- CONVERT STATUS: ALL consumers converted — welder (F4.1), miner incl. 115 m eject excursion (F4.2),
-  survey + parker (F4.3). Remaining legacy flight: the two DOCK machines (proven; F5 wraps them as a
-  verb) and the miner's bore machine (proven direct control, stays by design). AvoidanceProbe and
-  the autopilot cruise helpers are now unreferenced outside dock recovery — delete with F5.
+- CONVERT STATUS: COMPLETE. All consumers fly the core (welder F4.1, miner + 115 m eject excursion
+  F4.2, survey + parker F4.3). F5 wrapped the shared DockMachine as the `Dock` verb (welder + parker
+  route through it; the MINER's bespoke dock stays legacy-by-design — proven, and its recovery keeps
+  a minimal autopilot hop). AvoidanceProbe and the autopilot cruise helpers are DELETED. Remaining
+  intentional direct-control islands: the bore machine, the miner dock, the parker touchdown sink.
 
 ---
 

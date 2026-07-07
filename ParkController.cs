@@ -36,6 +36,7 @@ namespace ColonyFramework
         private readonly FlightController _fc = new FlightController(); // F4.3: flight legs on the core
 
         private int _state = PDecide;
+        private bool _dockIssued;
         private Vector3D _spot, _hoverPoint;
         private DateTime _legStart, _touchStart, _retryAt, _lastReroute, _lastLog;
 
@@ -98,8 +99,9 @@ namespace ColonyFramework
             if (droneCon != null && connectorAvailable)
             {
                 DroneUtil.PrepareForFlight(grid);
-                _fc.Release(grid); // the dock machine owns the actuators from here
+                _fc.Release(grid);
                 _dock.Reset();
+                _dockIssued = false;
                 _state = PDock;
                 Log(asset, "idle — docking at a free connector to recharge");
                 return;
@@ -129,15 +131,16 @@ namespace ColonyFramework
 
         private void TickDock(AssetRecord asset, IMyCubeGrid grid, IMyCubeBlock core, IMyShipConnector droneCon)
         {
-            string r = _dock.Tick(grid, _nav, droneCon, core, _cons);
-            if (r == DockMachine.Connected) { Nap(grid, asset, true); return; }
-            if (r != null && r.StartsWith("fail:"))
+            // F5: docking as a flight-core verb (the proven DockMachine still drives).
+            if (!_dockIssued) { _fc.Dock(grid, _dock, core, _cons); _dockIssued = true; return; }
+            if (_fc.Status == FlightController.VerbStatus.Done)
+            { _dockIssued = false; Nap(grid, asset, true); return; }
+            if (_fc.Status == FlightController.VerbStatus.Failed)
             {
                 // Docking didn't work out (connector taken, bump-fail...) — land instead next try.
-                Log(asset, "park dock failed (" + r.Substring(5) + ") — will land instead");
-                _fly.Release(grid);
-                var rc = DroneUtil.FindRc(grid);
-                if (rc != null) { rc.SetAutoPilotEnabled(false); rc.DampenersOverride = true; }
+                _dockIssued = false;
+                Log(asset, "park dock failed (" + _fc.FailReason + ") — will land instead");
+                _fc.Release(grid);
                 _retryAt = DateTime.UtcNow.AddSeconds(RetryCooldownSecs);
                 _state = PDecide;
             }

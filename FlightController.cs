@@ -30,7 +30,7 @@ namespace ColonyFramework
     {
         public enum VerbStatus { Idle, Running, Done, Failed }
 
-        private const int VNone = 0, VHover = 1, VMoveTo = 2, VTransit = 3, VCreep = 4, VSlide = 5;
+        private const int VNone = 0, VHover = 1, VMoveTo = 2, VTransit = 3, VCreep = 4, VSlide = 5, VDock = 6;
 
         private const double Kv = 1.5;             // velocity-error gain (1/s) — gentle, 6 Hz stable
         private const double DeadbandDv = 0.4;     // m/s — below this, hand the axis back to dampeners
@@ -115,6 +115,25 @@ namespace ColonyFramework
             ResetLegState();
         }
 
+        // F5: the proven DockMachine wrapped as a verb — one actuator-owner interface for docking
+        // too. The machine drives (it's the proven geometry); this verb just adopts its lifecycle:
+        // Done on lock, Failed(reason) on any "fail:*" so callers use the same status handling as
+        // every other verb. FailReason carries the machine's reason verbatim (callers may branch on
+        // "no free base connector" for hold-retry).
+        private DockMachine _dockMachine;
+        private ConnectorReservations _dockCons;
+        private long _dockCoreId;
+        private readonly NavState _dockNav = new NavState();
+
+        public void Dock(IMyCubeGrid grid, DockMachine machine, IMyCubeBlock core, ConnectorReservations cons)
+        {
+            _dockMachine = machine;
+            _dockCons = cons;
+            _dockCoreId = core != null ? core.EntityId : 0;
+            _verb = VDock;
+            Status = VerbStatus.Running;
+        }
+
         // FLIGHT.md §5.3 — the active maneuver declares volumes that are NOT obstacles. Steering
         // exempts grids inside them; the maneuver's geometry owns safety there. Terrain never exempt.
         public void DeclareWorkVolume(BoundingSphereD sphere) { _workVolumes.Add(sphere); }
@@ -144,6 +163,20 @@ namespace ColonyFramework
             if (_verb == VNone) return;
             var rc = DroneUtil.FindRc(grid);
             if (rc == null || grid.Physics == null) { Fail(grid, "rc/physics lost"); return; }
+
+            // Dock verb: the machine drives; we only adopt its lifecycle (no Face/velocity loop here).
+            if (_verb == VDock)
+            {
+                var core = MyAPIGateway.Entities.GetEntityById(_dockCoreId) as IMyCubeBlock;
+                _dockNav.Refresh(grid, rc, DroneUtil.FindConnector(grid));
+                string r = _dockMachine != null
+                    ? _dockMachine.Tick(grid, _dockNav, DroneUtil.FindConnector(grid), core, _dockCons)
+                    : "fail:no dock machine";
+                if (r == DockMachine.Connected) { _verb = VNone; Status = VerbStatus.Done; return; }
+                if (r != null && r.StartsWith("fail:"))
+                { FailReason = r.Substring(5); Status = VerbStatus.Failed; _verb = VNone; return; }
+                return;
+            }
 
             // Self-knowledge, refreshed when mass drifts (cargo changes everything).
             if (_model == null || Math.Abs(grid.Physics.Mass - _modelMass) > _modelMass * 0.10)

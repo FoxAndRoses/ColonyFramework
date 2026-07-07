@@ -69,6 +69,7 @@ namespace ColonyFramework
         private readonly OrbitNav _orbit = new OrbitNav(); // around-the-hull geometry (feeds goals to _fc)
         private readonly DockMachine _dock = new DockMachine(); // shared proven connector-dock sequence
         private bool _issuedDirect; // approach: a direct leg to the approach point is in flight
+        private bool _dockIssued;   // dock-load: the Dock verb is running
 
         private bool _initialized;
         private int _retries;
@@ -175,6 +176,7 @@ namespace ColonyFramework
             {
                 DroneUtil.PrepareForFlight(grid); // batteries auto + thrusters on + unlock — autopilot won't do any of it
                 _dock.Reset();                    // shared dock machine flies the approach itself
+                _dockIssued = false;              // TickDockLoad issues the Dock verb fresh
             }
             else
             {
@@ -192,22 +194,32 @@ namespace ColonyFramework
 
             if (!_loading)
             {
-                string r = _dock.Tick(grid, _nav, droneCon, core, _cons);
-                if (r == DockMachine.Connected) { _dockWaiting = false; EnterLoading(grid); return; }
-                if (r == "fail:no free base connector")
+                // F5: docking runs as a flight-core VERB (the proven DockMachine still drives).
+                if (_dockIssued && _fc.Status == FlightController.VerbStatus.Done)
+                { _dockIssued = false; _dockWaiting = false; EnterLoading(grid); return; }
+                if (_dockIssued && _fc.Status == FlightController.VerbStatus.Failed)
                 {
+                    _dockIssued = false;
+                    if (_fc.FailReason != "no free base connector")
+                    { RetryOrFail(colony, m, grid, _fc.FailReason); return; }
                     // Legitimate queueing, not a failure: hold on dampers and re-ask periodically.
                     if (!_dockWaiting) { _dockWaiting = true; _dockWaitStart = DateTime.UtcNow; Log(m, "all connectors busy — holding for a free one"); }
+                }
+                if (_dockWaiting)
+                {
                     var rcw = DroneUtil.FindRc(grid);
                     if (rcw != null) { rcw.SetAutoPilotEnabled(false); if (!rcw.DampenersOverride) rcw.DampenersOverride = true; }
                     if ((DateTime.UtcNow - _dockWaitStart).TotalSeconds > 600)
                     { _dockWaiting = false; RetryOrFail(colony, m, grid, "no connector freed up in 10 min"); return; }
-                    if ((DateTime.UtcNow - _lastDockWaitRetry).TotalSeconds >= 10)
-                    { _lastDockWaitRetry = DateTime.UtcNow; _dock.Reset(); } // fresh acquisition attempt
-                    return;
+                    if ((DateTime.UtcNow - _lastDockWaitRetry).TotalSeconds < 10) return; // still cooling down
+                    _lastDockWaitRetry = DateTime.UtcNow;
                 }
-                if (r != null && r.StartsWith("fail:")) { RetryOrFail(colony, m, grid, r.Substring(5)); return; }
-                _dockWaiting = false;
+                if (!_dockIssued)
+                {
+                    _dock.Reset();
+                    _fc.Dock(grid, _dock, core, _cons);
+                    _dockIssued = true;
+                }
                 return;
             }
 

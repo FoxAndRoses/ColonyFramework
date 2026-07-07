@@ -33,6 +33,8 @@ namespace ColonyFramework
         private const double GameSpeedCap = 95.0;  // SE hard speed limit safety margin
 
         private readonly BoreController _fly = new BoreController(); // proven damped gyro Face
+        private readonly FlightSteering _steer = new FlightSteering(); // F2: context steering + camera probe
+        private readonly List<BoundingSphereD> _workVolumes = new List<BoundingSphereD>();
         private ShipSelfModel _model;
         private double _modelMass;
 
@@ -66,6 +68,12 @@ namespace ColonyFramework
             _progressTime = DateTime.UtcNow;
             Status = VerbStatus.Running;
         }
+
+        // FLIGHT.md §5.3 — the active maneuver declares volumes that are NOT obstacles (the
+        // construction being welded, the base near dock). Steering exempts grids inside them;
+        // the maneuver's own geometry owns safety there. Terrain is never exempt.
+        public void DeclareWorkVolume(BoundingSphereD sphere) { _workVolumes.Add(sphere); }
+        public void ClearWorkVolumes() { _workVolumes.Clear(); }
 
         // Give everything back: overrides zero, dampeners ON (the safety net on every exit path).
         public void Release(IMyCubeGrid grid)
@@ -129,7 +137,19 @@ namespace ColonyFramework
             // (v = √(2·a·d)), the verb's cap, and the game's. "Fast vs slow" is physics, not a constant.
             double aBrake = WeakestAccel();
             double vAllowed = Math.Min(Math.Min(_vMax, GameSpeedCap), Math.Sqrt(Math.Max(0, 2 * aBrake * dist)));
-            Vector3D vStar = dist > 0.05 ? (err / dist) * vAllowed : Vector3D.Zero;
+            Vector3D vStar;
+            Vector3D steerDir; double steerCap;
+            if (_verb == 2 && dist > Profile.ArriveTol * 3
+                && _steer.Steer(grid, _model, Profile, pos, vel, target, _workVolumes, out steerDir, out steerCap))
+            {
+                // Path needs shaping (terrain/grid/camera): fly the steered direction at its cap.
+                // The trapezoid's goal-distance brake still applies — deviation never overshoots.
+                vStar = steerDir * Math.Min(vAllowed, steerCap);
+            }
+            else
+            {
+                vStar = dist > 0.05 ? (err / dist) * vAllowed : Vector3D.Zero;
+            }
 
             Vector3D dv = vStar - vel;
             if (dv.Length() < DeadbandDv && vStar.Length() < 0.5)

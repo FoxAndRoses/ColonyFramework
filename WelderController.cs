@@ -64,11 +64,11 @@ namespace ColonyFramework
 
         private const double DockMoveSpeed = 6.0; // slow hop used by the transit-recover leg
 
-        private readonly BoreController _fly = new BoreController();
+        private readonly FlightController _fc = new FlightController(); // F4.1: THE actuator owner for all flight
         private readonly NavState _nav = new NavState();
-        private readonly AvoidanceProbe _avoid = new AvoidanceProbe();
-        private readonly OrbitNav _orbit = new OrbitNav(); // fluid around-the-hull navigation at the site
+        private readonly OrbitNav _orbit = new OrbitNav(); // around-the-hull geometry (feeds goals to _fc)
         private readonly DockMachine _dock = new DockMachine(); // shared proven connector-dock sequence
+        private bool _issuedDirect; // approach: a direct leg to the approach point is in flight
 
         private bool _initialized;
         private int _retries;
@@ -133,6 +133,10 @@ namespace ColonyFramework
                 case PhaseWork:       TickWork(colony, m, grid, projector); break;
                 case PhaseReturn:     TickReturn(colony, m, grid); break;
             }
+
+            // ONE actuator owner (FLIGHT.md §5.1): pump the flight core every tick. During DockLoad
+            // the DockMachine owns actuators and _fc is Released (Idle) — its Tick is a no-op.
+            _fc.Tick(grid);
         }
 
         // ── Commission: same shape as the miner (welders don't need the full draw math — verify RC,
@@ -162,6 +166,8 @@ namespace ColonyFramework
         // ── DockLoad: get connected to the base, pull components, recharge, then fly to the site ────
         private void BeginDockLoad(Colony colony, Mission m, IMyCubeGrid grid)
         {
+            _fc.Release(grid);        // hand the actuators to the DockMachine — one owner at a time
+            _fc.ClearWorkVolumes();
             m.Phase = PhaseDockLoad;
             var droneCon = DroneUtil.FindConnector(grid);
             _loading = droneCon != null && droneCon.Status == MyShipConnectorStatus.Connected;
@@ -235,7 +241,7 @@ namespace ColonyFramework
         private void EnterLoading(IMyCubeGrid grid)
         {
             _loading = true;
-            _fly.Release(grid);
+            _fc.Release(grid);
             BeginCharging(grid);
             _legStart = DateTime.UtcNow;
         }
@@ -260,31 +266,19 @@ namespace ColonyFramework
         private void BeginTransit(Mission m, IMyCubeGrid grid, IMyProjector projector)
         {
             m.Phase = PhaseTransit;
-            CruiseTo(grid, SiteStandoff(projector), CruiseSpeedLimit, "build site", null);
+            // F4.1: planned corridor on the flight core. The construction is declared a WORK VOLUME
+            // so steering never treats it (or its separate under-construction grid) as an obstacle.
+            _fc.ClearWorkVolumes();
+            _fc.DeclareWorkVolume(KeepOut(projector, grid));
+            _fc.Transit(grid, FlightCorridor.Plan(grid.GetPosition(), SiteStandoff(projector), _fc.Profile.CruiseAgl),
+                        CruiseSpeedLimit);
         }
 
         private void TickTransit(Colony colony, Mission m, IMyCubeGrid grid, IMyProjector projector)
         {
-            Vector3D standoff = SiteStandoff(projector);
-            double dist = Vector3D.Distance(grid.GetPosition(), standoff);
-            if (dist > ArriveDistance)
-            {
-                var rc = DroneUtil.FindRc(grid);
-                if (rc != null && !rc.DampenersOverride) rc.DampenersOverride = true;
-                Vector3D via; string obstacle;
-                if (_avoid.TryGetDetour(_nav, grid, standoff, out via, out obstacle,
-                    40.0, projector.CubeGrid.EntityId)) // destination structure isn't an obstacle
-                {
-                    CruiseTo(grid, standoff, CruiseSpeedLimit, "build site", via);
-                    Log(m, string.Format("deflected around obstacle {0}, resumed heading", obstacle));
-                    return;
-                }
-                string fail = LegOk(dist, LegTimeoutSecs, "site transit");
-                if (fail != null) RetryOrFail(colony, m, grid, fail);
-                return;
-            }
-            var rc2 = DroneUtil.FindRc(grid);
-            if (rc2 != null) rc2.SetAutoPilotEnabled(false);
+            if (_fc.Status == FlightController.VerbStatus.Failed)
+            { RetryOrFail(colony, m, grid, "site transit: " + _fc.FailReason); return; }
+            if (_fc.Status != FlightController.VerbStatus.Done) return; // corridor in progress
             _retries = 0;
             m.Phase = PhaseWork;
             _workSub = WorkSelect;
@@ -343,7 +337,7 @@ namespace ColonyFramework
 
         private void TickSelect(Colony colony, Mission m, IMyCubeGrid grid, IMyProjector projector)
         {
-            _fly.Drive(grid, grid.WorldMatrix.Forward, grid.WorldMatrix.Forward, 0); // hold (dampers)
+            // The flight core is already holding (Done verbs hold where they finished).
             if ((DateTime.UtcNow - _lastSelect).TotalSeconds < SelectThrottleSecs) return;
             _lastSelect = DateTime.UtcNow;
 
@@ -428,6 +422,9 @@ namespace ColonyFramework
             _workSub = WorkApproach;
             _approachStart = DateTime.UtcNow;
             _lastSiteReroute = default(DateTime); // first TickApproach issues the first orbit/direct leg immediately
+            _issuedDirect = false;
+            _fc.ClearWorkVolumes();
+            _fc.DeclareWorkVolume(KeepOut(projector, grid)); // the construction is the work, not an obstacle
             Log(m, string.Format("weld: target block at ({0:F0}, {1:F0}, {2:F0}), {3} remaining",
                 _targetWorld.X, _targetWorld.Y, _targetWorld.Z, projector.RemainingBlocks));
         }
@@ -437,86 +434,61 @@ namespace ColonyFramework
             if (!_hasTarget) { _workSub = WorkSelect; return; }
             Vector3D pos = grid.GetPosition();
             Vector3D up = _nav.Valid ? _nav.GravityUp : Vector3D.Up;
-            double dist = Vector3D.Distance(pos, _approachPoint);
 
-            if (dist > ApproachTol || _nav.Speed > SettleSpeed)
+            // Whole-approach budget: too long overall → this block is awkward right now, defer it.
+            if ((DateTime.UtcNow - _approachStart).TotalSeconds > ApproachTimeoutSecs)
+            { DeferTarget("approach timeout"); return; }
+            if (_fc.Status == FlightController.VerbStatus.Failed)
+            { DeferTarget("approach: " + _fc.FailReason); return; }
+
+            if (_issuedDirect)
             {
-                var rcm = DroneUtil.FindRc(grid);
-                if (rcm != null && !rcm.DampenersOverride) rcm.DampenersOverride = true;
+                if (_fc.Status != FlightController.VerbStatus.Done) return; // direct leg still flying
 
-                // Whole-approach budget (orbit legs re-issue autopilot, so a per-leg watchdog can't
-                // time this): too long overall → this block is awkward to reach right now, defer it.
-                if ((DateTime.UtcNow - _approachStart).TotalSeconds > ApproachTimeoutSecs)
-                { DeferTarget("approach timeout"); return; }
-
-                if ((DateTime.UtcNow - _lastSiteReroute).TotalSeconds >= SiteRerouteSecs)
+                // At the approach point. Reach test: one ray from here to the block — if the
+                // construction itself is in the way, the block isn't externally reachable; defer.
+                IHitInfo hit;
+                if (MyAPIGateway.Physics.CastRay(_approachPoint, _targetWorld, out hit) && hit != null)
                 {
-                    _lastSiteReroute = DateTime.UtcNow;
-
-                    // Third-party obstacles first (other grids / terrain rises); the construction
-                    // itself is excluded — the orbit rule owns it.
-                    Vector3D via; string obstacle;
-                    if (_avoid.TryGetDetour(_nav, grid, _approachPoint, out via, out obstacle,
-                        8.0, projector.CubeGrid.EntityId))
-                    {
-                        CruiseToDirect(grid, via, (float)OrbitLegSpeed, "avoid detour");
-                        Log(m, string.Format("deflected around obstacle {0}", obstacle));
-                        return;
-                    }
-
-                    // Orbit-or-direct: slide along the keep-out sphere until line-of-sight to the
-                    // approach point opens, then fly straight at it. Stateless — one step per reroute.
-                    Vector3D wp;
-                    bool direct = _orbit.NextStep(pos, _approachPoint, KeepOut(projector, grid), up, WelderMinAgl, out wp);
-                    CruiseToDirect(grid, wp, (float)(direct ? ApproachSpeed : OrbitLegSpeed),
-                        direct ? "weld approach" : "orbit");
+                    var hitGrid = hit.HitEntity as IMyCubeGrid;
+                    if (hitGrid != null && hitGrid.EntityId != grid.EntityId
+                        && Vector3D.DistanceSquared(hit.Position, _targetWorld) > 9.0)
+                    { DeferTarget("blocked by structure"); return; }
                 }
+                var welders = DroneUtil.FindWelders(grid);
+                if (welders.Count == 0) { Fail(colony, m, grid, "welders lost"); return; }
+                var projected = projector.ProjectedGrid;
+                double blockHalf = projected != null && projected.GridSizeEnum == VRage.Game.MyCubeSize.Large ? 1.25 : 0.25;
+                DroneUtil.SetWelders(grid, true);
+                Log(m, "weld: tool on, creeping in"); // enable is otherwise invisible in-game
+                _fc.OrientAndCreep(grid, _targetWorld, welders[0] as VRage.Game.ModAPI.IMyCubeBlock,
+                                   WeldReach + blockHalf, WeldInSpeed);
+                _weldStart = DateTime.UtcNow;
+                _workSub = WorkWeldIn;
                 return;
             }
-            var rc = DroneUtil.FindRc(grid);
-            if (rc != null) rc.SetAutoPilotEnabled(false);
 
-            // Reach test: one ray from the approach point to the block — if the construction itself is
-            // in the way, this block isn't externally reachable right now; defer it.
-            IHitInfo hit;
-            if (MyAPIGateway.Physics.CastRay(_approachPoint, _targetWorld, out hit) && hit != null)
+            // Orbit-or-direct as goals into the CONTINUOUS velocity loop (re-issuing a goal blends
+            // smoothly — no autopilot churn): slide along the keep-out sphere until line-of-sight
+            // opens, then commit one direct leg and let its arrival latch fire.
+            if ((DateTime.UtcNow - _lastSiteReroute).TotalSeconds >= SiteRerouteSecs)
             {
-                var hitGrid = hit.HitEntity as IMyCubeGrid;
-                if (hitGrid != null && hitGrid.EntityId != grid.EntityId
-                    && Vector3D.DistanceSquared(hit.Position, _targetWorld) > 9.0)
-                { DeferTarget("blocked by structure"); return; }
+                _lastSiteReroute = DateTime.UtcNow;
+                Vector3D wp;
+                bool direct = _orbit.NextStep(pos, _approachPoint, KeepOut(projector, grid), up, WelderMinAgl, out wp);
+                if (direct) { _fc.MoveTo(grid, _approachPoint, ApproachSpeed * 2); _issuedDirect = true; }
+                else _fc.MoveTo(grid, wp, OrbitLegSpeed);
             }
-            DroneUtil.SetWelders(grid, true);
-            Log(m, "weld: tool on, creeping in"); // enable is otherwise invisible — testers reported "never enables"
-            _weldStart = DateTime.UtcNow;
-            _workSub = WorkWeldIn;
-            ResetLeg();
         }
 
         private void TickWeldIn(Colony colony, Mission m, IMyCubeGrid grid, IMyProjector projector)
         {
+            // The OrientAndCreep verb owns flight: tool faced down the line, creeping onto the stop
+            // ring, then holding pose. This state only watches the WORK.
             var projected = projector.ProjectedGrid;
+            if (_fc.Status == FlightController.VerbStatus.Failed)
+            { DeferTarget("weld-in: " + _fc.FailReason); BackOut(grid); return; }
 
-            // Aim and stop by the WELDER TOOL, not the grid: the old grid-centre aim with an
-            // AABB-half-diagonal stop parked the tool itself out of range — the block never welded,
-            // timed out, deferred ("misses 95% of the time"). Face the welder's own forward down the
-            // line, creep from the welder's position, stop when the TOOL is within its work zone.
-            var welders = DroneUtil.FindWelders(grid);
-            if (welders.Count == 0) { Fail(colony, m, grid, "welders lost"); return; }
-            var tool = welders[0];
-            Vector3D toolPos = tool.GetPosition();
-            Vector3D toBlock = _targetWorld - toolPos;
-            double dist = toBlock.Length();
-            if (dist < 1e-2) return;
-            Vector3D dir = toBlock / dist;
-
-            _fly.Face(grid, tool.WorldMatrix.Forward, dir); // align the TOOL, wherever it's mounted
-
-            double blockHalf = projected != null && projected.GridSizeEnum == VRage.Game.MyCubeSize.Large ? 1.25 : 0.25;
-            double stopDist = WeldReach + blockHalf; // tool within its ~2m work zone of the block face
-
-            // Done? The projection no longer contains the cell once the block is placed; the welder
-            // (still running, still in range) then welds it up. Give it a beat past placement.
             if (_coord != null) _coord.TryClaim(m.Id, projector.EntityId, _targetCell, _targetWorld); // keep the claim fresh
             bool placed = projected == null || projected.GetCubeBlock(_targetCell) == null;
             if (placed)
@@ -527,34 +499,20 @@ namespace ColonyFramework
             }
             if ((DateTime.UtcNow - _weldStart).TotalSeconds > WeldBlockTimeoutSecs)
             { DeferTarget("weld timeout (missing components?)"); BackOut(grid); return; }
-
-            if (dist > stopDist)
-                _fly.ThrustAlong(grid, dir, WeldInSpeed, 1.0f, 0.5f); // ease nose-in; dampers brake the rest
-            // inside stopDist: hold and let the welder work (dampers hold position)
         }
 
         private void BackOut(IMyCubeGrid grid)
         {
             DroneUtil.SetWelders(grid, false);
+            _fc.SlideTo(grid, _approachPoint, ApproachSpeed); // attitude LOCKED — never swing the nose beside the hull
             _workSub = WorkBackOut;
-            ResetLeg();
         }
 
         private void TickBackOut(Colony colony, Mission m, IMyCubeGrid grid)
         {
-            Vector3D pos = grid.GetPosition();
-            Vector3D toOut = _approachPoint - pos;
-            double dist = toOut.Length();
-            if (dist > ApproachTol)
-            {
-                _fly.ThrustAlong(grid, toOut / dist, ApproachSpeed * 0.5, 1.0f, 0.5f);
-                string fail = LegOk(dist, 60.0, "weld back-out");
-                if (fail != null) { RetryOrFail(colony, m, grid, fail); }
-                return;
-            }
-            _fly.Release(grid);
-            var rc = DroneUtil.FindRc(grid);
-            if (rc != null) rc.DampenersOverride = true;
+            if (_fc.Status == FlightController.VerbStatus.Failed)
+            { RetryOrFail(colony, m, grid, "back-out: " + _fc.FailReason); return; }
+            if (_fc.Status != FlightController.VerbStatus.Done) return;
             _hasTarget = false;
             _workSub = WorkSelect;
         }
@@ -571,40 +529,22 @@ namespace ColonyFramework
         private void BeginReturn(Colony colony, Mission m, IMyCubeGrid grid, bool resupply)
         {
             DroneUtil.SetWelders(grid, false);
-            _fly.Release(grid);
             _returningToResupply = resupply;
             m.Phase = PhaseReturn;
             Vector3D standoff;
             if (!TryCoreStandoff(colony, out standoff)) { Complete(colony, m, grid, "no core"); return; }
-            CruiseTo(grid, standoff, CruiseSpeedLimit, "base standoff", null);
+            _fc.ClearWorkVolumes();
+            _fc.Transit(grid, FlightCorridor.Plan(grid.GetPosition(), standoff, _fc.Profile.CruiseAgl), CruiseSpeedLimit);
         }
 
         private void TickReturn(Colony colony, Mission m, IMyCubeGrid grid)
         {
-            Vector3D standoff;
-            if (!TryCoreStandoff(colony, out standoff)) { Complete(colony, m, grid, "no core"); return; }
-            double dist = Vector3D.Distance(grid.GetPosition(), standoff);
-            if (dist > ArriveDistance)
-            {
-                var rc = DroneUtil.FindRc(grid);
-                if (rc != null && !rc.DampenersOverride) rc.DampenersOverride = true;
-                Vector3D via; string obstacle;
-                if (_avoid.TryGetDetour(_nav, grid, standoff, out via, out obstacle))
-                {
-                    CruiseTo(grid, standoff, CruiseSpeedLimit, "base standoff", via);
-                    Log(m, string.Format("deflected around obstacle {0}, resumed heading", obstacle));
-                    return;
-                }
-                string fail = LegOk(dist, LegTimeoutSecs, "return");
-                if (fail != null) RetryOrFail(colony, m, grid, fail);
-                return;
-            }
-            var rc2 = DroneUtil.FindRc(grid);
-            if (rc2 != null) rc2.SetAutoPilotEnabled(false);
-            if (_nav.Speed > SettleSpeed) return; // let dampers stop it
+            if (_fc.Status == FlightController.VerbStatus.Failed)
+            { RetryOrFail(colony, m, grid, "return: " + _fc.FailReason); return; }
+            if (_fc.Status != FlightController.VerbStatus.Done) return;
             _retries = 0;
             if (_returningToResupply) BeginDockLoad(colony, m, grid); // dock -> load -> charge -> back to the site
-            else Complete(colony, m, grid, "recalled to base");       // graceful recall: stop here, mission over
+            else { _fc.Release(grid); Complete(colony, m, grid, "recalled to base"); } // graceful recall: stop here
         }
 
         // Graceful back-out (/colony recall): stop welding and fly home; mission completes at the standoff.
@@ -632,39 +572,6 @@ namespace ColonyFramework
             return new BoundingSphereD(box.Center, box.HalfExtents.Length() + selfRadius + 4.0);
         }
 
-        // Climb-then-cruise (mirrors the miner's EngageCruise, incl. the optional avoidance detour).
-        private void CruiseTo(IMyCubeGrid grid, Vector3D target, float speed, string label, Vector3D? via)
-        {
-            var rc = DroneUtil.FindRc(grid);
-            if (rc == null) return;
-            rc.DampenersOverride = true;
-            rc.ClearWaypoints();
-            Vector3D pos = grid.GetPosition();
-            double agl;
-            if (DroneUtil.TryGetAltitude(grid, out agl) && agl < CruiseAltitudeAgl)
-                rc.AddWaypoint(MinerController.ClimbPoint(pos, target, _nav.Valid ? _nav.GravityUp : Vector3D.Up,
-                    CruiseAltitudeAgl - agl), "climb to cruise");
-            if (via.HasValue) rc.AddWaypoint(via.Value, "avoid detour");
-            rc.AddWaypoint(target, label);
-            rc.FlightMode = FlightMode.OneWay;
-            rc.SpeedLimit = speed;
-            rc.SetAutoPilotEnabled(true);
-            ResetLeg();
-        }
-
-        // Direct single-waypoint hop (short legs near the site/base — no cruise climb).
-        private void CruiseToDirect(IMyCubeGrid grid, Vector3D target, float speed, string label)
-        {
-            var rc = DroneUtil.FindRc(grid);
-            if (rc == null) return;
-            rc.DampenersOverride = true;
-            rc.ClearWaypoints();
-            rc.AddWaypoint(target, label);
-            rc.FlightMode = FlightMode.OneWay;
-            rc.SpeedLimit = speed;
-            rc.SetAutoPilotEnabled(true);
-            ResetLeg();
-        }
 
         private bool TryCoreStandoff(Colony colony, out Vector3D standoff)
         {
@@ -698,17 +605,20 @@ namespace ColonyFramework
             _retries++;
             if (_retries > MaxRetries) { Fail(colony, m, grid, reason); return; }
             Log(m, string.Format("retry {0}/{1} — {2}", _retries, MaxRetries, reason));
-            // Soft reset: stabilize, then re-enter the current phase from its beginning.
-            _fly.Release(grid);
+            // Soft reset: stabilize (flight core released → dampeners), re-enter the phase fresh.
+            _fc.Release(grid);
             DroneUtil.SetWelders(grid, false);
-            var rc = DroneUtil.FindRc(grid);
-            if (rc != null) { rc.SetAutoPilotEnabled(false); rc.DampenersOverride = true; }
             _dock.Reset(); // fresh dock attempt (new connector pick) on the retry
             switch (m.Phase)
             {
                 case PhaseDockLoad: BeginDockLoad(colony, m, grid); break;
-                case PhaseTransit:  CruiseTo(grid, grid.GetPosition() + _nav.GravityUp * 30, (float)DockMoveSpeed, "recover climb", null); m.Phase = PhaseTransit; break;
-                case PhaseWork:     _hasTarget = false; _workSub = WorkSelect; break;
+                case PhaseTransit:
+                {
+                    var proj = MyAPIGateway.Entities.GetEntityById(_projectorId) as IMyProjector;
+                    if (proj != null) BeginTransit(m, grid, proj); else Fail(colony, m, grid, "projector gone");
+                    break;
+                }
+                case PhaseWork:     _hasTarget = false; _workSub = WorkSelect; _fc.Hover(grid); break;
                 case PhaseReturn:   BeginReturn(colony, m, grid, _returningToResupply); break;
             }
         }
@@ -746,9 +656,8 @@ namespace ColonyFramework
             if (_coord != null) _coord.ReleaseClaim(_missionId);
             DroneUtil.SetWelders(grid, false);
             DroneUtil.SetBatteriesRecharge(grid, false); // never leave Recharge leaked into idle
-            _fly.Release(grid);
-            var rc = DroneUtil.FindRc(grid);
-            if (rc != null) { rc.SetAutoPilotEnabled(false); rc.DampenersOverride = true; }
+            _fc.Release(grid); // flight core release restores dampeners — the terminal safety net
+            _fc.ClearWorkVolumes();
         }
 
         private void Log(Mission m, string msg)

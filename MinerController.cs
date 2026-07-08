@@ -218,7 +218,9 @@ namespace ColonyFramework
 
             // Awareness before execution: refresh the drone's self-knowledge once per tick. No phase
             // issues movement while this is invalid (missing RC/physics) — it must know itself first.
-            _nav.Refresh(grid, DroneUtil.FindRc(grid), DroneUtil.FindConnector(grid));
+            var rcCtl = DroneUtil.FindRc(grid);
+            if (rcCtl != null && rcCtl.IsUnderControl) return; // player has the wheel — never fight the pilot
+            _nav.Refresh(grid, rcCtl, DroneUtil.FindConnector(grid));
             if (!_nav.Valid) return;
 
             try
@@ -275,6 +277,7 @@ namespace ColonyFramework
         // a short measured hop that compares real lift against the ShipSelfModel's prediction. ──
         private ShipSelfModel _selfModel;
         private LaunchSelfTest _selfTest;
+        private double _measuredDrawMw; // commissioning spike draw — the ledger's cost basis
 
         private void TickCommission(Colony colony, Mission m, DepositRecord deposit, IMyCubeGrid grid)
         {
@@ -340,6 +343,7 @@ namespace ColonyFramework
             DroneUtil.SetSpike(grid, false);
 
             double drawMw = reactorOut + batOut;            // total consumption under full load
+            _measuredDrawMw = drawMw;                       // the energy ledger plans return legs with this
             _requiredChargePct = ComputeRequiredCharge(batOut, cap); // batOut = battery's share = drain rate
 
             bool hasReactor = reactorOut > 0.0;             // a working reactor sustains the base load
@@ -572,16 +576,18 @@ namespace ColonyFramework
             var drills = DroneUtil.FindDrills(grid);
             if (drills.Count == 0) { BeginRetreat(m, grid, "drills lost"); return; }
 
-            if (!DroneUtil.HasInfinitePower(grid))
+            // MISSION.md D4: the battery is a fuel tank — distance-aware, named abort (replaces flat 20%).
+            Vector3D corePos;
+            if (TryCorePos(colony, out corePos))
             {
-                double charge = DroneUtil.MinBatteryCharge(grid);
-                if (charge < LowPowerThreshold)
+                string ledger = MissionLedger.ShouldReturn(grid, corePos, _measuredDrawMw);
+                if (ledger != null)
                 {
                     if (!MyAPIGateway.Utilities.IsDedicated)
                         MyAPIGateway.Utilities.ShowMessage("Colony", string.Format(
-                            "Drone low power ({0:N0}%), aborting to base to recharge", charge * 100));
+                            "'{0}' returning to recharge — {1}", grid.DisplayName, ledger));
                     _depositExhausted = false; // recharge and come back to finish this deposit
-                    BeginRetreat(m, grid, string.Format("low power ({0:N0}%)", charge * 100));
+                    BeginRetreat(m, grid, ledger);
                     return;
                 }
             }

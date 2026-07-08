@@ -219,10 +219,69 @@ cooldown, self-knowledge via PrepareForFlight/nap. No stories needed; it is the 
 
 ---
 
+# FLEET-LEVEL contracts (colony-scope, user round-2 additions)
+
+## Blueprint capture — THE UNLOCK `[verify at first use]`
+`IMyProjector.SetProjectedGrid(MyObjectBuilder_CubeGrid)` exists (confirmed present in
+Sandbox.Game.dll) and mods can serialize any live grid via `GetObjectBuilder()`. Therefore the mod
+can CAPTURE a registered drone at commissioning — its known-good, self-test-passing self, with
+inventories/battery-state stripped from the OB — persist it in world storage, and paste it into any
+same-grid-size projector on demand. This powers three contracts below. Caveats to verify: OB
+sanitization (inventories, ownership, battery charge), same-grid-size requirement, MP sync.
+
+## Story F-A — "Missing pieces" (self-repair & decommission; user-directed)
+Damage isn't only dents — blocks can be MISSING, and a welder can only restore what a projection
+defines. Every drone's captured blueprint (above) is its repair reference.
+- Drone self-check (self-model vs live blocks) finds damage → if it carries an ONBOARD projector:
+  load own capture, a repair-welder (or itself, if it's a welder and can reach) restores it at a
+  repair pad. If the onboard projector is itself dead or the drone is TOO DAMAGED to fly missions
+  safely (fails its self-test, or ledger says it can't complete any mission): **DECOMMISSION** —
+  fly (or be declared) to a graveyard spot AWAY from base, power down, UNREGISTER, GPS-mark
+  "decommissioned — disassembly", and (with blueprint capture) queue a replacement build.
+- Failure modes: drone too damaged to REACH the graveyard (decommission in place, mark position);
+  repair projection of a moved/rotated drone misaligns (repair happens ON the pad at a fixed
+  connector — projector alignment story to play out at implementation). → chunk **M7**.
+
+## Fleet move & formations (user-directed)
+`/colony move <gps|here> [wing]` — a Move mission type for N drones: shared corridor, per-drone
+lateral/vertical offset slots (formation = anchor + offsets; the flight core already separates
+drones via steering, formations make it INTENTIONAL). Prereq for combat wings and base relocation.
+→ chunk **M6** (with threat zones — fleeing IS a fleet move).
+
+## Ship classes (user-directed; Elite-style pads)
+Class from ShipSelfModel physical size (AABB max dimension): S (<8 m), M (<20 m), L (≥20 m) —
+thresholds tunable. Landing pads/connectors advertise capacity by name tag (`[Pad M]`) or
+auto-measured clearance; reservation/parking match `class ≤ pad class`. **Mod compatibility is
+structural:** every capability is detected by INTERFACE (IMyThrust, IMyShipDrill, IMyShipWelder,
+IMyUserControllableGun, IMyGasTank) and measured by its own reported numbers (MaxEffectiveThrust),
+so modded thrusters/drills/weapons are covered automatically; blocks that don't implement standard
+interfaces are invisible (accepted limit, documented). → rides **M5/M6**.
+
+## COMBAT DRONE contract (placeholder — full template instance before any code, per the rule)
+Identity: turrets/fixed guns (IMyUserControllableGun/IMyLargeTurretBase — interface-detected, mod
+weapons included), ammo inventory, speed class. Arc: patrol / escort / intercept / RTB. Doctrine to
+write as stories: rules of engagement (fire only on confirmed hostiles that damaged colony assets —
+griefing safety), target selection, AMMO AS FUEL in the ledger (D4 generalizes), disengage criteria
+(the ledger again: can I fight AND make it home), escort formations (fleet move), and the
+self-sacrifice ram as the terminal story (criteria: ledger-dead + no armed help + attacker engaging
+others). → chunks **M8+**, contract first.
+
+## Story F-B — "The shipyard" (fleet expansion, upgraded by blueprint capture)
+FleetPlanner: sustained mission backlog per type → pick an idle same-grid-size shipyard projector →
+`SetProjectedGrid(capture)` → existing weld pipeline builds it → completed grid passes commissioning
+self-test → auto-register. No player pre-loading needed. Failure modes: no shipyard projector
+(named chat ask), capture stale after player upgrades a drone (recapture on each successful
+commission — the fleet's blueprints track their live ships). → chunk **M5**.
+
 # M-chunks (contracts above; each = one commit + Testing block)
 | Chunk | Implements | Owner |
 |---|---|---|
-| M1 MissionLedger | D4 — miner/welder/survey, replaces flat 20% | Opus-able |
+| M1 MissionLedger + hygiene | D4 (miner/welder/survey, replaces flat 20%) + role eligibility (Scout type, per-mission eligibility) + ore-under-base exclusion + warehouse backpressure + player-control pause | Fable/Opus |
+| M1.5 FuelModel | hydrogen/hybrid ledger, ice-is-fuel junk exception, emergency refuel, survival ice demand | Opus w/ contract |
 | M2 Miner arrival intelligence | M-A axis selection + M-B depth budget + M-D dump vector; axis-generalized bore bookkeeping | Fable |
 | M3 Welder reach solver | W-A candidates/fit/attitude + W-B drone-never-exempt fix | Fable |
-| M4 (stretch) /colony brief | expose ledger/axis/depth/dump reasoning per drone | Opus-able |
+| M4 /colony brief | expose ledger/axis/depth/dump reasoning per drone | Opus-able |
+| M5 Shipyard + blueprint capture | F-B + capture-at-commission + ship classes (pads) | Fable first (capture `[verify]`), then Opus |
+| M6 Threat response + fleet move | flee, no-go volumes, /colony move formations | Opus w/ contract |
+| M7 Repair & decommission | F-A | Opus w/ contract |
+| M8+ Combat drones | contract instance FIRST, then doctrine chunks | Fable contract |

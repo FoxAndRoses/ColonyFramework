@@ -106,6 +106,7 @@ namespace ColonyFramework
             if (coord != null) coord.UpdatePresence(m.Id, grid.GetPosition());
             var rc = DroneUtil.FindRc(grid);
             if (rc == null) { Fail(colony, m, grid, "no remote control"); return; }
+            if (rc.IsUnderControl) return; // player has the wheel — never fight the pilot
             _nav.Refresh(grid, rc, DroneUtil.FindConnector(grid));
 
             if (!_initialized)
@@ -304,15 +305,16 @@ namespace ColonyFramework
         // ── Work: select -> approach -> weld-in -> back-out, repeat ──────────────────────────────────
         private void TickWork(Colony colony, Mission m, IMyCubeGrid grid, IMyProjector projector)
         {
-            // Low power protection (welders + thrusters drain fast).
-            if (!DroneUtil.HasInfinitePower(grid))
+            // MISSION.md D4: distance-aware energy ledger (live draw — welders + thrusters running now).
+            Vector3D coreStandoffForLedger;
+            if (TryCoreStandoff(colony, out coreStandoffForLedger))
             {
-                double charge = DroneUtil.MinBatteryCharge(grid);
-                if (charge < LowPowerThreshold)
+                string ledger = MissionLedger.ShouldReturn(grid, coreStandoffForLedger, 0);
+                if (ledger != null)
                 {
                     if (!MyAPIGateway.Utilities.IsDedicated)
                         MyAPIGateway.Utilities.ShowMessage("Colony", string.Format(
-                            "Welder low power ({0:N0}%), returning to recharge", charge * 100));
+                            "'{0}' returning to recharge — {1}", grid.DisplayName, ledger));
                     BeginReturn(colony, m, grid, true);
                     return;
                 }

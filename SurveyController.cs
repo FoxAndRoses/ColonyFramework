@@ -56,6 +56,7 @@ namespace ColonyFramework
         {
             var rc = DroneUtil.FindRc(grid);
             if (rc == null) { Fail(colony, m, grid, "no remote control"); return; }
+            if (rc.IsUnderControl) return; // player has the wheel — never fight the pilot
             _nav.Refresh(grid, rc, DroneUtil.FindConnector(grid));
 
             if (!_initialized)
@@ -67,15 +68,17 @@ namespace ColonyFramework
             var core = MyAPIGateway.Entities.GetEntityById(colony.State.CoreEntityId) as VRage.Game.ModAPI.IMyCubeBlock;
             if (core == null) { Complete(colony, m, grid, "no core"); return; }
 
-            // Low power: head home; the cursor is persisted per scanned point, nothing is lost.
-            if (m.Phase != PhaseReturn && !DroneUtil.HasInfinitePower(grid))
+            // MISSION.md D4 + Story S-A: distance-aware energy ledger bounds the ring — the drone
+            // flies points until the RETURN leg (which grows with the ring) would eat the battery.
+            // The persisted cursor makes partial laps lossless.
+            if (m.Phase != PhaseReturn)
             {
-                double charge = DroneUtil.MinBatteryCharge(grid);
-                if (charge < LowPowerThreshold)
+                string ledger = MissionLedger.ShouldReturn(grid, core.GetPosition(), 0);
+                if (ledger != null)
                 {
                     if (!MyAPIGateway.Utilities.IsDedicated)
                         MyAPIGateway.Utilities.ShowMessage("Colony", string.Format(
-                            "Survey drone low power ({0:N0}%), returning", charge * 100));
+                            "'{0}' returning — {1}", grid.DisplayName, ledger));
                     BeginReturn(colony, m, grid);
                     return;
                 }

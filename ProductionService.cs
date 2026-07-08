@@ -355,11 +355,27 @@ namespace ColonyFramework
                 foreach (var kv in status.MissingOre) demanded.Add(kv.Key);
             if (AllowIceMining(colony)) demanded.Add("Ice");
 
+            // Warehouse backpressure: a full base can't take deliveries — pause demand instead of
+            // stranding a loaded miner at the connector (MISSION.md hygiene).
+            double baseFill = DroneUtil.GroupCargoFill(core.CubeGrid);
+            if (baseFill > 0.90)
+            {
+                demanded.Clear();
+                if ((DateTime.UtcNow - GetState(colony.OwnerKey).LastChat).TotalSeconds >= ChatThrottleSecs)
+                {
+                    GetState(colony.OwnerKey).LastChat = DateTime.UtcNow;
+                    if (!MyAPIGateway.Utilities.IsDedicated)
+                        MyAPIGateway.Utilities.ShowMessage("Colony", string.Format(
+                            "base storage {0:P0} full — mining paused until space frees up", baseFill));
+                }
+            }
+
             long tick = MyAPIGateway.Session.GameDateTime.Ticks;
             var basePos = core.GetPosition();
             foreach (var ore in demanded)
             {
-                var dep = colony.Deposits.FindNearestUnclaimed(basePos, ore);
+                // 80 m exclusion: never bore a deposit directly under the colony's own foundation.
+                var dep = colony.Deposits.FindNearestUnclaimed(basePos, ore, 80.0);
                 if (dep != null && colony.Missions.CreateMineMission(dep.Id, tick))
                     MyLog.Default.WriteLineAndConsole(string.Format(
                         "[ColonyFramework] production: demand mining {0} — mission for deposit {1}", ore, dep.Id));

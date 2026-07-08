@@ -301,6 +301,35 @@ namespace ColonyFramework
             return found ? min : 1.0; // no batteries = external power, don't recall
         }
 
+        // Cargo fill fraction across the whole physical group (warehouse backpressure check).
+        public static double GroupCargoFill(IMyCubeGrid anyGridInGroup)
+        {
+            var grids = new List<IMyCubeGrid>();
+            var group = anyGridInGroup.GetGridGroup(GridLinkTypeEnum.Physical);
+            if (group != null) group.GetGrids(grids);
+            if (grids.Count == 0) grids.Add(anyGridInGroup);
+            double cur = 0, max = 0;
+            var blocks = new List<IMySlimBlock>();
+            for (int g = 0; g < grids.Count; g++)
+            {
+                blocks.Clear();
+                grids[g].GetBlocks(blocks);
+                for (int b = 0; b < blocks.Count; b++)
+                {
+                    var fat = blocks[b].FatBlock as IMyCubeBlock;
+                    if (fat == null || !fat.HasInventory || !IsCargoBlock(fat)) continue;
+                    for (int i = 0; i < fat.InventoryCount; i++)
+                    {
+                        var inv = fat.GetInventory(i);
+                        if (inv == null) continue;
+                        cur += (double)inv.CurrentVolume;
+                        max += (double)inv.MaxVolume;
+                    }
+                }
+            }
+            return max > 0 ? cur / max : 0;
+        }
+
         // Base power picture across the whole physical group: battery stored/capacity (MWh) and
         // current battery + reactor output (MW). For the status line, LCD dashboard, and warnings.
         public static void GroupPower(IMyCubeGrid anyGridInGroup, out double storedMWh, out double capMWh,

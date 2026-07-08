@@ -4,7 +4,7 @@ using VRageMath;
 
 namespace ColonyFramework
 {
-    public enum AssetType { Miner = 0, Welder = 1 }
+    public enum AssetType { Miner = 0, Welder = 1, Scout = 2 } // append-only (protobuf)
 
     public enum AssetStatus { Idle = 0, Assigned = 1, Offline = 2 }
 

@@ -139,12 +139,13 @@ namespace ColonyFramework
                     var a = assets[j];
                     if (a.Status != AssetStatus.Idle) continue;
                     if (wantType.HasValue && a.Type != wantType.Value) continue;
+                    double sq = Vector3D.DistanceSquared(a.LastPosition, dpos);
                     if (m.Type == MissionType.Survey)
                     {
                         var g = MyAPIGateway.Entities.GetEntityById(a.EntityId) as VRage.Game.ModAPI.IMyCubeGrid;
                         if (g == null || DroneUtil.FindOreDetector(g) == null) continue; // needs a working detector
+                        if (a.Type != AssetType.Scout) sq *= 16; // dedicated scouts get first pick; a detector-equipped miner is the fallback
                     }
-                    double sq = Vector3D.DistanceSquared(a.LastPosition, dpos);
                     if (sq < bestSq) { bestSq = sq; best = a; }
                 }
                 if (best == null) continue; // no capable idle asset — other mission types may still match

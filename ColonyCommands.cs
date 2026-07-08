@@ -181,15 +181,25 @@ namespace ColonyFramework
                     MyAPIGateway.Utilities.ShowMessage("Colony", "no eligible drone grid within 100m (the base/core is excluded)");
                     return;
                 }
-                // Classify by tooling: drills -> Miner (wins if both), welders -> Welder.
-                AssetType type = DroneUtil.FindDrills(nearest).Count > 0 ? AssetType.Miner
-                    : DroneUtil.FindWelders(nearest).Count > 0 ? AssetType.Welder
-                    : AssetType.Miner;
+                // Classify by tooling (MISSION.md Identity): drills -> Miner (wins if both),
+                // welders -> Welder, ore-detector-only -> Scout; no mission tools at all -> reject
+                // (an unclassifiable grid would sit idle forever or get missions it must fail).
+                AssetType type;
+                if (DroneUtil.FindDrills(nearest).Count > 0) type = AssetType.Miner;
+                else if (DroneUtil.FindWelders(nearest).Count > 0) type = AssetType.Welder;
+                else if (DroneUtil.FindOreDetector(nearest) != null) type = AssetType.Scout;
+                else
+                {
+                    MyAPIGateway.Utilities.ShowMessage("Colony", string.Format(
+                        "'{0}' has no mission tools (drills / welders / ore detector) — not registered", nearest.DisplayName));
+                    return;
+                }
                 colony.Assets.Register(nearest.EntityId, type, nearest.GetPosition(), nearest.DisplayName);
                 _executor.ReleaseControls(nearest); // clear any stale overrides so it won't thrust on its own
                 MyAPIGateway.Utilities.ShowMessage("Colony", string.Format(
                     "registered '{0}' as {1} ({2} assets total)", nearest.DisplayName,
-                    type == AssetType.Welder ? "welder" : "miner", colony.Assets.Assets.Count));
+                    type == AssetType.Welder ? "welder" : type == AssetType.Scout ? "scout" : "miner",
+                    colony.Assets.Assets.Count));
                 return;
             }
 

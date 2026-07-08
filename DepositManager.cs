@@ -75,17 +75,21 @@ namespace ColonyFramework
             d.ClaimedByEntityId = 0;
         }
 
-        // Nearest Unclaimed deposit, optional ore filter. For mission dispatch.
-        public DepositRecord FindNearestUnclaimed(Vector3D from, string oreType = null)
+        // Nearest Unclaimed deposit, optional ore filter. minDist = exclusion radius around 'from':
+        // never hand out a deposit UNDER the base — a drone would happily undermine the colony's
+        // own foundation (MISSION.md hygiene).
+        public DepositRecord FindNearestUnclaimed(Vector3D from, string oreType = null, double minDist = 0)
         {
             DepositRecord best = null;
             double bestSq = double.MaxValue;
+            double minSq = minDist * minDist;
             for (int i = 0; i < _state.Deposits.Count; i++)
             {
                 var d = _state.Deposits[i];
                 if (d.Status != DepositStatus.Unclaimed) continue;
                 if (oreType != null && d.OreType != oreType) continue;
                 double sq = Vector3D.DistanceSquared(d.Position, from);
+                if (sq < minSq) continue;
                 if (sq < bestSq) { bestSq = sq; best = d; }
             }
             return best;

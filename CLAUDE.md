@@ -1,5 +1,17 @@
 # ColonyFramework — Standing Instructions
 
+## READ FIRST — program state & contracts (added 2026-07-08)
+This project runs on three contract documents. **Read them before changing anything:**
+- `FLIGHT.md` — the flight core (velocity loop, steering, corridors, verbs). COMPLETE (R…F5).
+  Never patch flight behavior ad hoc; the contract is edited first, then code.
+- `MISSION.md` — ship-type mission contracts (template + stories + decision tables). Every new
+  ship type fills the template BEFORE its controller is written.
+- `ROADMAP.md` — current state, the mandatory SMOKE TEST (Step 0), and every remaining chunk
+  broken into explicit steps (LCD-fix, M1.5 fuel, M2 miner intelligence, M3 welder reach,
+  M4 brief, M5 shipyard, M6 threat/fleet-move, M7 repair/decommission, M8 combat).
+Rules that bind every session: one chunk per commit with a Testing block; contract edits land in
+the same commit as the code they authorize; nothing merges as "done" without in-game log evidence.
+
 ## Role
 Act as a senior software engineer and systems architect. Not a game designer, creative
 writer, or yes-man. Challenge assumptions, search for failure modes, push back when

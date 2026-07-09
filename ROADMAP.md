@@ -149,6 +149,56 @@ CONTRACT FIRST: expand the MISSION.md placeholder into a full template instance 
 rules-of-engagement stories, ammo-as-fuel ledger, disengage criteria, escort formations, the
 terminal ram story) and get it reviewed. No code before the contract.
 
+## Daydream round 3 — common-sense gaps (scenarios played against commit 39fceab)
+Each was walked through the actual code; "confirmed" = evidence already exists in code or logs.
+
+**H1 — hygiene chunk (small fixes, one commit, do after Step 0):**
+1. **"The stranger's ship"** (CONFIRMED — no ownership check in /colony register): you can register
+   any grid within 100 m, including another player's parked ship — the colony then flies it away.
+   Fix: majority BigOwners must resolve to the colony's OwnerKey; named rejection otherwise.
+2. **"The full drone that never unloads"** (CONFIRMED by code path): DockWaiting's 10-min ceiling
+   completes the mission WITH FULL CARGO; the parker then docks the drone for recharge but never
+   transfers cargo — ore is stranded aboard indefinitely. Fix: any drone parked AT A CONNECTOR
+   drains its cargo to base (parker Nap(docked) runs the existing unload transfer).
+3. **"The weld mission treadmill"** (CONFIRMED — earlier logs show `1 weld mission(s) created`
+   every production tick): after "nothing buildable"/"construction stalled" completes a weld
+   mission, EnsureWeldMissions re-creates it ~5 s later → dispatch → same outcome → infinite
+   charge-burning loop. Fix: per-projector cooldown (5 min) after a stall/nothing-buildable
+   completion, with a named log line.
+4. **"Two drones, one name"** (CONFIRMED in logs — two 'Mining Drone Mk1_3' rows): duplicate
+   DisplayNames make logs/GPS/briefs ambiguous. Fix: suffix asset Name with a short id at
+   registration (display only; grid name untouched).
+5. **"The starving base"**: parker sets docked drones to Recharge — pulling from BASE batteries.
+   On a solar base at night, the fleet recharge drains the colony below its own low-power warning.
+   Fix: parker skips Recharge mode (batteries Auto, still topping from surplus) when base storage
+   < 30% (`DroneUtil.GroupPower` exists).
+6. **"The 2% welder"**: dock-load departs when cargo fill > 2% — a welder can fly out with nearly
+   nothing and immediately boomerang for resupply. Fix: load target scaled to the job like the
+   charge gate (min(components-for-remaining-blocks, CargoLoadTarget)); the 120 s no-components
+   stand-down stays.
+
+**Fold into existing chunks:**
+7. **"Mining under the shipyard"** (→ M5): the 80 m exclusion is measured from the CORE point;
+   detached colony structures (shipyard pads, outposts within range) are unprotected. Fix: exclude
+   deposits within 60 m of ANY colony-owned static grid's AABB, not just the core.
+8. **"The ceiling connector"** (→ M5 pads): the dock shimmy assumes a roughly-upward connector
+   approach; a downward/side-mounted base connector under an overhang breaks the geometry. Fix:
+   classify connector facing at reservation time; deprioritize/reject non-upward pads with a named
+   reason until pad classes land.
+9. **"The speed mod"** (→ mod-compat, rides M5 ship classes): `GameSpeedCap = 95` hardcodes
+   vanilla; speed-mod worlds waste capability. Fix: read the world's max ship speed from the
+   environment definition at session load; keep 95 as the floor fallback.
+10. **"The asteroid"** (→ M2): zero-g mining is designed for (bore axis = toward ore; gravity
+    fallbacks exist) but has NEVER been exercised. M2's axis selection covers it naturally —
+    add an asteroid case to M2's acceptance tests rather than new code.
+11. **"The rival colony"** (→ future, note only): deposit claims are per-colony state — two
+    colonies on one planet can both claim the same deposit and send miners to the same hole.
+    Multi-colony arbitration is out of scope until multi-colony play is real; documented here so
+    nobody is surprised.
+12. **"The thousand-deposit database"** (→ housekeeping, anytime): the deposit DB only grows;
+    long-lived worlds accumulate depleted entries forever. Fix: prune Depleted deposits older than
+    ~48 h game time (append a tombstone log line).
+
 ## Decision log (preserved — why things are the way they are)
 - Full mod over PB scripts: PB sandbox cannot read voxels/ore or share across grids. Mining stays
   physical (voxel-carving/Nanite-style rejected: perf trap + violates thesis).

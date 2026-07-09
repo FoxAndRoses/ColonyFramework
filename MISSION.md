@@ -265,14 +265,24 @@ player deletes the anchor mid-build (site cancelled, zone dissolved, components 
 stay — named log); two builds at once (welder slots already arbitrate; sites queue if welders
 short).
 
-## BASE TOPOLOGY contract — attach vs found a district (user-directed)
-**The mechanism:** SE grids share power AND cargo through locked connectors — so every building
-capture includes a SERVICE CONNECTOR. "Attach" = the site survey additionally requires the module's
-service connector to land within lock reach of a free base-side connector; on completion it
-auto-Connects and joins the physical group (GroupPower/GroupCargoFill pick it up with zero code).
-"District" = a detached cluster with its own anchor; the colony ESTATE REGISTRY tracks every owned
-structure (transitive proximity graph from the core) and feeds mining exclusion, defense rings, and
-placement scoring.
+## BASE TOPOLOGY contract — attach vs found a district (user-directed; user-corrected mechanism)
+**ATTACH = SAME-GRID EXTENSION (no connectors — user-corrected).** Connector-lock sharing was
+rejected as a fragility stack (spawn alignment precision, lock maintenance, unlock on damage/
+reload). Instead: `IMyCubeGrid.AddBlock` `[verify]` lets the mod add blocks to the EXISTING base
+grid — transform the capture's block list into base-grid coordinates at the surveyed offset,
+PRE-VALIDATE every cell empty (CubeExists across the whole footprint — all-or-nothing, never a
+half-staked expansion), then stake the frames directly onto the base grid, throttled N blocks/tick.
+Same grid → conveyors and power connect NATIVELY as blocks complete; nothing to lock, align, or
+maintain. First-component debit and welder completion unchanged (frame-spawn as separate grid
+remains the mechanism for DETACHED districts and drones only).
+**Safe direction:** the expansion survey picks the footprint adjacent to the base with flat clear
+terrain, no ore beneath, and AWAY from pad approach corridors and districts (the estate registry
+knows where traffic lives).
+**DISTRICTS are isolated by design intent** — yard/solar/defense clusters are self-powered per
+their capture and supplied by drones via the existing resupply loop. No physical link, no lock
+dependency anywhere. Connectors keep the one job they are proven at: drone docking.
+The colony ESTATE REGISTRY tracks every owned structure (transitive proximity graph from the core)
+and feeds mining exclusion, defense rings, and placement scoring.
 
 **Placement policy by function (the "smart enough" table):**
 | Function | Policy | Why |
@@ -288,11 +298,13 @@ matching function (the yard grows pads; the ring grows turrets at the widest cov
 district is founded when the nearest matching district has no valid expansion site or is farther
 than its function tolerates. Every ExpansionPlanner proposal names its placement reasoning
 ("proposed: solar farm — power district B, unshadowed plateau 90 m NE").
-Failure modes: no valid attach site for a logistics module (fall back to a logistics district +
-Notify the degraded layout); connector-lock fails on completion (retry, then flag the module
-"unbridged" — functional but unshared, named); defense ring outgrows power (rings are
-self-powered by capture design); estate sprawls into a survey ring or mining field (estate members
-update the exclusion set the moment their anchor spawns — already contracted).
+Failure modes: no valid same-grid attach footprint (fall back to a logistics district + Notify the
+degraded layout — drones ferry cargo instead of conveyors); a cell occupied mid-validation by a
+parked drone (pre-validation re-runs at stake time; occupied → site re-survey); AddBlock refuses a
+block mid-stake despite validation (abort the stake, remove staked frames, named log — never a
+half expansion); defense ring outgrows power (rings self-powered by capture design); estate
+sprawls into a survey ring or mining field (estate members update the exclusion set the moment
+their frames exist — already contracted).
 
 # FLEET-LEVEL contracts (colony-scope, user round-2 additions)
 

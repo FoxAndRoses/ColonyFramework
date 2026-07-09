@@ -260,12 +260,14 @@ Steps:
    CanBuild in selection; everything else — multi-welder, stager, reach, resupply — unchanged).
 4b. Colony-initiated placement: ring-sampled site scoring (flatness, 30-150 m band, clearance, no
    ore under footprint) → `proposed: <name>` GPS + `/colony approve` gate.
-4c. BASE TOPOLOGY (contract: MISSION.md attach-vs-district): estate registry (transitive proximity
-   graph of owned structures, feeds exclusion/defense/placement); captures include a SERVICE
-   CONNECTOR; attach = survey additionally requires connector-lock reach to a free base connector,
-   auto-Connect on completion (power/cargo shared via the lock — zero extra code); districts per
-   the function table (logistics attach; solar/yard/defense ring detach); proposals name their
-   placement reasoning.
+4c. BASE TOPOLOGY (contract: MISSION.md attach-vs-district; user-corrected): estate registry
+   (transitive proximity graph of owned structures, feeds exclusion/defense/placement).
+   ATTACH = SAME-GRID extension: `IMyCubeGrid.AddBlock` `[verify in the B1 spike]` stakes the
+   capture's frames directly onto the base grid (coordinate transform + all-or-nothing CubeExists
+   pre-validation + N blocks/tick throttle) — conveyors/power connect natively, NO connectors.
+   DISTRICTS stay separate frame-spawned grids, self-powered, drone-supplied (no lock dependency
+   anywhere; connectors remain drone-docking only). Function table unchanged (logistics attach;
+   solar/yard/defense-ring detach); proposals name their placement reasoning.
 5. Site zone: no-go volume for non-assigned fleet + `[verify]` mod-created native Safe Zone for
    players/foreign grids (fallback: Notify warning + graceful stall on intrusion).
 6. Progress: self-renaming GPS marker (`<name> — NN%`), LCD line; completion dissolves the zone

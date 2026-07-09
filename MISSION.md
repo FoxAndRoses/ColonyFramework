@@ -177,6 +177,28 @@ absorb ~1 block of error; creep is 0.8 m/s — contact at that speed is a nudge,
 timeout defers if truly wedged, I5); block gets welded by the OTHER welder mid-solve (claims
 already gate — re-select). → **M3.**
 
+### Story W-D — "The stubborn block" (auto-complete fallback; user-directed)
+Setup: one block defeats every approach — deferred, retried after the deferred-pass reset, deferred
+again; the construction is 98% done and stalling on geometry no drone can reach.
+**Rule:** a cell that fails its post-retry pass again (2 full strikes) or weld-times-out 3 times is
+AUTO-COMPLETED: deduct the block's remaining components from colony stock, then finish it
+programmatically — `MoveItemsToConstructionStockpile` from a stock inventory +
+`IncreaseMountLevel` to full `[verify — the nanite-mod mechanism]`. Notify names it:
+"auto-completed Reactor at (…) — unreachable after 3 attempts; 12 components deducted".
+**Brakes (an auto-completer must not become a nanite factory):** per-construction cap (default 20%
+of total blocks, `/colony autocomplete <pct>`, 0 disables); stock must actually contain the
+components (short → the block waits like any other, named); the cap exceeded → construction stalls
+with "layout largely unreachable — redesign or assist", because at that point the blueprint, not
+the fleet, is the problem. Applies identically to projected blocks, frame-staked expansions, and
+repairs (same weld-target generalization).
+
+### Story W-E — "The hoarder" (no idle cargo; user-directed)
+Welders must not sit on components they aren't actively using: mission Complete/Fail/Recall
+unloads ALL remaining components back to base at the dock (the H1 parked-docked drain generalizes:
+ANY drone parked at a connector drains its cargo — ore, components, everything — EXCEPT an
+H2 drone's fuel-ice reserve, M1.5). Combined with the job-scaled load (H1), a welder carries only
+what its current job plausibly needs, and nothing leaves the economy in a parked hull.
+
 ### Story W-B — "Two welders, one hull" `[exists — validation story]`
 Claims + 10 m bubbles + presence already spread the fleet; the reach solver adds candidate-level
 courtesy: candidates whose corridor passes within the bubble of another welder's CLAIM are

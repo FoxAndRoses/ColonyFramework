@@ -100,8 +100,17 @@ Largest chunk; sub-steps are independently commit-able:
 5. **W-B fix (required):** `FlightSteering.RefreshObstacles` work-volume exemption must NEVER
    apply to registered fleet drones — pass asset ids through FlightController; drone grids stay
    obstacles inside work volumes.
-6. Acceptance: an interior block on a partially framed hull gets a visibly angled (pitched)
-   approach or the provable defer line; two welders never converge on one spot.
+6. **W-D auto-complete fallback** [contract: Story W-D]: per-cell strike tracking (2 full defer
+   strikes or 3 weld timeouts) → deduct remaining components from stock →
+   `MoveItemsToConstructionStockpile` + `IncreaseMountLevel` `[verify]` → Notify with reason and
+   deducted count. Brakes: per-construction cap (default 20%, `/colony autocomplete <pct>`, 0
+   disables), stock-availability gate, over-cap → named stall ("layout largely unreachable").
+7. **W-E no-hoarding** [contract: Story W-E]: welder Complete/Fail/Recall unloads ALL components
+   at dock; extend H1's parked-docked drain to ALL cargo types (minus M1.5 fuel-ice reserve).
+8. Acceptance: an interior block on a partially framed hull gets a visibly angled (pitched)
+   approach or the provable defer line; a truly unreachable block auto-completes with a named
+   deduction and the construction FINISHES; two welders never converge; an idle parked welder
+   carries zero components.
 
 ### M4 — /colony brief (stretch; anytime after M2)
 Read-only introspection: per active drone print mission/phase, ledger numbers, chosen bore

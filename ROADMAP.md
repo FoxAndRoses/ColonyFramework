@@ -108,21 +108,30 @@ Read-only introspection: per active drone print mission/phase, ledger numbers, c
 axis/depth budget/dump vector (miner), current candidate verdicts (welder). Expose small getter
 structs through DroneExecutor; no behavior changes.
 
-### M5 — Shipyard + blueprint capture [contract: fleet story F-B; API confirmed]
-1. `[verify]` SPIKE FIRST: `grid.GetObjectBuilder()` on a registered drone → sanitize the OB
-   (clear inventories, battery charge → default, ownership → colony founder) →
-   `IMyProjector.SetProjectedGrid(ob)` on a same-grid-size projector → confirm the projection
-   appears and is weldable. A throwaway `/colony capturetest` command is fine; remove after.
-2. Persist captures per asset type in world storage (separate files, not colony_world.xml).
-3. Recapture on every successful commissioning self-test (the fleet's blueprints track live ships).
-4. FleetPlanner (ProductionService cadence): pending missions per type > idle drones of that type,
-   sustained 5 min → find idle `[Shipyard]`-named projector of matching grid size →
-   SetProjectedGrid → existing weld pipeline builds it → auto-register on completion (scope by
-   shipyard name + proximity) → normal self-test commissions it.
-5. Ship classes ride along: S/M/L by AABB max dimension (<8 m, <20 m, ≥20 m); pad tags
+### M5 — Blueprint capture + ExpansionPlanner [contract: GROWTH story F-B — user-unified on
+FRAME-SPAWN for ALL captures (drones AND buildings); SetProjectedGrid demoted to fallback]
+1. `[verify]` SPIKE FIRST (shared with B1): `grid.GetObjectBuilder()` on a registered drone →
+   sanitize (inventories, battery charge, ownership) → rebuild the OB with all blocks at frame
+   BuildPercent + empty stockpiles → spawn → confirm the scaffold appears and welds to completion.
+   Verify the SetProjectedGrid fallback once too. Throwaway `/colony capturetest`; remove after.
+2. Persist captures per type in world storage (separate files, not colony_world.xml); recapture on
+   every successful commissioning self-test (blueprints track their live ships).
+3. Weld-target generalization (shared with B1 and M7 repair): weld missions target "incomplete
+   blocks on a designated construction grid" — integrity check replaces CanBuild; stager, slots,
+   reach solver unchanged.
+4. ExpansionPlanner (ProductionService cadence) per the GROWTH contract: autonomy ladder
+   OFF / PROPOSE (default) / FULL set at the core terminal (persisted); "possible" gates (stock
+   keep-back 30%, idle welder, surveyed flat site, power margin >20%); "appropriate" signal table
+   (mission backlog → +drone; cargo >85% → +storage; refinery queue → +refinery; power margin →
+   +power; repair queue → +pad, via B1); ONE build queued at a time; priority power > storage >
+   refinery > drones > pads; hard per-type caps (`/colony cap`); siege freeze; every autonomous
+   build Notified with its reason ("expanding: +1 miner — 14 pending vs 2 idle").
+5. New-drone flow: frame-spawn on a clear pad site near base (mini B-A survey) → welders complete
+   → commissioning self-test → auto-register.
+6. Ship classes ride along: S/M/L by AABB max dimension (<8 m, <20 m, ≥20 m); pad tags
    `[Pad S|M|L]`; ConnectorReservations matches class ≤ pad class.
-6. Acceptance: sustained backlog prints and registers a new miner with no player action beyond
-   having built/named the shipyard.
+7. Acceptance: sustained mining backlog frame-spawns, welds, self-tests, and registers a new miner
+   — after `/colony approve` in PROPOSE, automatically with the reason Notified in FULL.
 
 ### M6 — Threat response + fleet move [contract: fleet sections]
 1. `MyAPIGateway.Session.DamageSystem` handler → drone under fire → named abort ("under attack,

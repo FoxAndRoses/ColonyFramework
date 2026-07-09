@@ -374,12 +374,36 @@ griefing safety), target selection, AMMO AS FUEL in the ledger (D4 generalizes),
 self-sacrifice ram as the terminal story (criteria: ledger-dead + no armed help + attacker engaging
 others). → chunks **M8+**, contract first.
 
-## Story F-B — "The shipyard" (fleet expansion, upgraded by blueprint capture)
-FleetPlanner: sustained mission backlog per type → pick an idle same-grid-size shipyard projector →
-`SetProjectedGrid(capture)` → existing weld pipeline builds it → completed grid passes commissioning
-self-test → auto-register. No player pre-loading needed. Failure modes: no shipyard projector
-(named chat ask), capture stale after player upgrades a drone (recapture on each successful
-commission — the fleet's blueprints track their live ships). → chunk **M5**.
+## Story F-B — "The colony grows" (GROWTH contract — user-unified: ONE mechanism for everything)
+**FRAME-SPAWN (Story B-A step 2) is the universal construction path for ALL colony captures —
+buildings AND drones.** No shipyard projector needed: a new drone is frame-spawned on a clear pad
+site near base (mini site-survey), first-component cost debited, welders complete it, the finished
+grid runs the commissioning self-test and auto-registers. `SetProjectedGrid` is demoted to fallback
+everywhere. Recapture-on-commission keeps every blueprint tracking its live ship.
+
+**The autonomy ladder (per colony, set at the core terminal):**
+- OFF — construction only by explicit player command.
+- PROPOSE (default) — the ExpansionPlanner drops `proposed:` GPS markers + Notify; `/colony
+  approve` builds.
+- FULL — approved automatically, within the caps below. ("if full autonomy enabled")
+
+**"Possible" (all must hold):** materials in stock ≥ build cost + a KEEP-BACK reserve (default 30%
+of current stock — expansion never starves production); an idle welder (or one within the backlog
+tolerance); a surveyed, clear, flat site (B-A scoring); base power margin > 20%.
+**"Appropriate" (any sustained ≥10 min, one build queued at a time, per-type caps):**
+| Signal | Expansion |
+|---|---|
+| pending missions per drone-type > idle drones of type | +1 drone of that type (cap: /colony cap) |
+| base cargo > 85% while mining demand exists | +1 storage building |
+| refinery queue depth growing while ore stockpiled | +1 refinery building |
+| power margin < 20% sustained | +1 power building |
+| damaged drones waiting > repair capacity | +1 repair pad |
+Failure modes: two signals fire at once (one queue, priority = power > storage > refinery > drones
+> pads — a starving base builds nothing well); FULL autonomy + siege (threat zones freeze the
+planner like they freeze reinforcements); runaway growth (hard per-type caps + the keep-back
+reserve are the brakes; every autonomous build is Notified with its reason: "expanding: +1 miner —
+14 pending missions vs 2 idle miners"). → chunk **M5 (drones)**, **B1 (buildings)**, planner in
+**M5**.
 
 # M-chunks (contracts above; each = one commit + Testing block)
 | Chunk | Implements | Owner |

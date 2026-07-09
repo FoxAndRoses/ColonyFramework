@@ -144,6 +144,46 @@ structs through DroneExecutor; no behavior changes.
    replacement.
 4. Acceptance: grinding a thruster off a drone produces the full named path end-to-end.
 
+### NET-1 — Multiplayer correctness (REQUIRED — user directive: "completely MP friendly")
+Known breaks traced in current code (no test needed to confirm the first two):
+- `CommandCoreSession.LoadData` registers `MessageEntered` only in the SERVER branch → joined
+  clients have no chat handler; commands are dead for everyone but the host.
+- Every `ShowMessage` is local-process-only and wrapped in `!IsDedicated` → on a dedicated server
+  NOBODY receives any colony feedback, ever.
+Steps:
+1. Protobuf command packet (`[ProtoContract]`, append-only): { senderIdentityId, command string }.
+   Client session (non-server branch) registers MessageEntered → intercepts `/colony …` → sends via
+   `MyAPIGateway.Multiplayer.SendMessageToServer` (one registered ushort channel id).
+2. Server handler: resolve sender identity → OWNERSHIP CHECK (sender's faction/identity must match
+   the colony OwnerKey — same rule as registration) → route into the existing `ColonyCommands.Handle`.
+3. Notify service replacing raw ShowMessage everywhere: `Notify(colony, msg)` → server sends a
+   packet to the owning faction's online players → tiny client handler shows chat/HUD text. Delete
+   the `!IsDedicated` guards (they exist only because ShowMessage was local).
+4. Verify-and-fix pass: GPS (`AddGps(identityId, …)` must target each faction player — verify it
+   syncs), LCD `WriteText` from server (verify client render), self-test/ledger chat lines all
+   through Notify.
+5. Acceptance: on a dedicated server, a JOINED (non-host) faction member runs /colony status,
+   dispatch, flighttest — everything works and all feedback arrives; a non-faction player's
+   commands are rejected by name.
+
+### UI-1 — Terminal controls + hotbar actions (small; after NET-1)
+1. `MyAPIGateway.TerminalControls` on the Colony Core block: buttons Dispatch / Recall / Abort /
+   Scan, a status multiline label, blueprint/build info. All actions route through the SAME
+   server command path as chat (NET-1) — the UI is just another ingress.
+2. Block ACTIONS (toolbar-bindable): Dispatch, Recall, Status-to-chat — players put colony
+   control on a cockpit hotbar.
+3. Acceptance: full colony control from the core's terminal + hotbar with zero chat typing,
+   as host AND as joined client.
+
+### UI-2 — RichHud radial menu (user-approved Tier 3; after UI-1)
+1. Soft dependency handshake with RichHudFramework (standard inter-mod message registration at
+   session start); when absent → log once and fall back to UI-1 (no hard dependency, no crash).
+2. Radial menu (bind key, default vanilla-safe): Dispatch / Recall / Status / Build / Fleet-move
+   (M6) / Brief (M4) — entries route through the NET-1 command path like every other ingress.
+3. HUD status readout (optional page): the LCD dashboard content as a toggleable HUD panel.
+4. Acceptance: radial opens/commands as host and joined client; mod loads cleanly WITHOUT
+   RichHud installed.
+
 ### M8+ — Combat drones
 CONTRACT FIRST: expand the MISSION.md placeholder into a full template instance (identity, arc,
 rules-of-engagement stories, ammo-as-fuel ledger, disengage criteria, escort formations, the

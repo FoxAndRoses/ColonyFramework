@@ -184,14 +184,18 @@ UX rules (user directive: thoroughly friendly, sensible nesting):
 - Destructive entries (Abort, Decommission) get a confirm ring (drag through twice), nothing else.
 - CONTEXT SENSITIVITY: if the player is AIMING at a registered drone (camera ray), the root gains
   a "This ship ▸" branch scoped to it; otherwise colony-wide entries only.
-Menu tree (v1):
-- Root: Status (instant HUD readout) · **Command ▸** · Fleet ▸ · Work ▸ · [This ship ▸] · Colony ▸
-- **Command ▸** (the posture front-end, MISSION.md POSTURE): Follow me · Aggressive · Defensive ·
-  Stand down · R&R
-- Fleet ▸: Reinforce me (R2) · Move here (M6) · Release escorts · Recall all
-- Work ▸: Dispatch · Scan here · Build status · Abort⚠
-- This ship ▸ (aimed): Brief (M4) · Recall · Flight test · Decommission⚠
-- Colony ▸ (Founder tier): Reserve % · Ranks · Rename
+Menu tree (v1) — SCOPE LAW (user-corrected): the radial commands the player's OWN WING and makes
+REQUESTS of the core; the core's strategic state (colony posture, reserve %, ranks, rename) is set
+ONLY at the core block terminal (UI-1) — physical presence required.
+- Root: Status (instant HUD readout) · **Command ▸** (my wing) · Request ▸ (asks the core) ·
+  [This ship ▸] (aimed, own-wing ship)
+- **Command ▸** (MISSION.md WING COMMAND — only visible while a wing is assigned): Follow me ·
+  Aggressive · Defensive · Stand down · Dismiss/R&R⚠
+- Request ▸: Reinforce me (R2) · Scan here · Build status · Move fleet here (Leader+, M6 — the
+  core decides from surplus)
+- This ship ▸ (aimed own-wing ship): Brief (M4) · Send home · Flight test
+UI-1 addendum: the CORE TERMINAL gains the strategic panel — colony posture (Defensive/Aggressive/
+Stand down/R&R), reserve %, ranks, rename — rank-gated Leader+/Founder, never available remotely.
 Steps:
 1. Soft dependency handshake with RichHudFramework; absent → log once, fall back to UI-1.
 2. Implement the tree above; every leaf routes through the NET-1 command path (the radial is just

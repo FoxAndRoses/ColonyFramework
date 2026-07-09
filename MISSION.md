@@ -295,21 +295,31 @@ last position, then RTB); reinforcements pulled while base is under attack (thre
 the reserve doctrine at 100% — nothing leaves a besieged base); two players calling at once
 (surplus is a single pool — first-come, remainder gets a named "insufficient surplus" reply).
 
-## COLONY POSTURE contract (user-directed; the "Command" radial submenu is its front-end)
-A colony-wide stance (persisted, append-only ProtoMember; per-wing overrides later) that every
-controller consults. Changing posture is rank-gated (Leader+) and Notify-broadcast to the faction.
+## COMMAND SCOPES contract (user-corrected): WING COMMAND vs COLONY POSTURE
+Two distinct scopes; the UI enforces the split by WHERE each is available.
 
-| Posture | Combat drones | Work drones (miner/welder/survey) | Parker/base |
-|---|---|---|---|
-| **Defensive** (default) | engage only what attacks colony assets/players | normal missions | normal |
-| **Aggressive** | proactively engage identified hostiles in patrol range (M8 RoE still gates IDs) | normal missions; threat zones shrink (bolder) | normal |
-| **Stand down** | weapons hold; hold position/formation | finish current PHASE, then hold — no new legs | no new dispatches |
-| **R&R** | RTB and park | complete current mission, then RTB; no new missions | park all, recharge to full, queue repairs (M7) |
-| **Follow me** (caller-scoped order, not a colony posture) | escort caller (R2 calm-context directly) | unaffected | unaffected |
-Interactions pre-played: posture change mid-mission never hard-aborts (Stand down holds at the next
-phase boundary — a miner 40 m down a shaft climbs out FIRST); R&R + warehouse-full is fine (parking
-needs no cargo space); Aggressive never overrides the siege lock or RoE identification rules;
-Stand down freezes auto-dispatch AND the shipyard (no new hulls while someone ordered quiet).
+**1. WING COMMAND — the player's OWN fleet (radial "Command ▸" submenu, available anywhere).**
+Ships the core has ASSIGNED to a player (reinforcements R2, or explicit assignment) form that
+player's WING. The wing has its own stance, set by its commander from the radial:
+| Wing stance | Wing ships |
+|---|---|
+| **Follow me** (default on join) | formation on the commander, weapons per stance below |
+| **Aggressive** | engage identified hostiles near the wing proactively (M8 RoE still gates) |
+| **Defensive** | engage only what attacks the wing/commander |
+| **Stand down** | weapons hold, hold formation |
+| **Dismiss / R&R** | wing released — ships RTB, park, recharge, queue repairs; assignment ends |
+Wing stances affect ONLY the wing's ships. The energy-ledger RTB (an escort turning home by name
+before stranding) overrides any stance. Wing membership + stance persist (append-only) so a
+reload doesn't orphan an assigned wing.
+
+**2. COLONY POSTURE — the core's strategic state (set ONLY at the core block terminal, UI-1).**
+Colony-wide Defensive/Aggressive/Stand-down/R&R with the controller semantics table (work drones
+finish their current PHASE before holding — a miner 40 m down a shaft climbs out first; Stand down
+freezes auto-dispatch and the shipyard; R&R parks and queues repairs; Aggressive never overrides
+the siege lock or RoE). Changing it requires PHYSICAL PRESENCE at the core terminal + rank
+(Leader+) — strategic changes cannot be made from the field, by design (also a security property).
+Radial items outside "Command ▸" are REQUESTS to the core (reinforce me, scan here, build status)
+— the core grants them per rank/surplus/posture; it is never commanded remotely.
 Identity: turrets/fixed guns (IMyUserControllableGun/IMyLargeTurretBase — interface-detected, mod
 weapons included), ammo inventory, speed class. Arc: patrol / escort / intercept / RTB. Doctrine to
 write as stories: rules of engagement (fire only on confirmed hostiles that damaged colony assets —

@@ -184,6 +184,39 @@ Steps:
 4. Acceptance: radial opens/commands as host and joined client; mod loads cleanly WITHOUT
    RichHud installed.
 
+### V1 — Asset value ledger + protective reserve [contract: MISSION.md VALUE LEDGER]
+(after M5's ship classes; before R2)
+1. Material-worth table (one static dict: ingot type → weight; Pt/U/Au heavy).
+2. ValueScore at commissioning: tonnage term + Σ(block components → ingots → weights); cache on
+   AssetRecord (new append-only ProtoMember).
+3. Reserve doctrine: `/colony reserve <pct>` (persisted); reserve = highest-value idle assets to
+   the pct; `Surplus()` query on the asset manager used by fleet-move/reinforcements/shipyard.
+4. Acceptance: /colony assets shows value + reserve flags; a fleet-move of "all" leaves the
+   reserve home, by name.
+
+### R1 — Ranks & rank-gated commands [contract: MISSION.md RANKS; after NET-1]
+1. Tier resolution: faction Founder/Leader/Member → colony tiers, with `/colony rank set` override
+   persisted in colony state (append-only).
+2. NET-1's server command router gains per-command tier requirements (one table); rejections named.
+3. Server sends each player their capability list on join/rank change → UI-1 buttons and the UI-2
+   radial render only permitted commands.
+4. Acceptance: a Member sees/can use only their tier's commands on a dedicated server.
+
+### R2 — Reinforcements [contract: Story R-A/R-B; after M6 formations, V1, R1; combat case after M8]
+1. `/colony reinforce` (radial/chat): rank tier → budget (Member ≤1×S, Leader ≤3×M, Founder =
+   surplus) → nearest class-appropriate surplus assets; per-candidate D2/TWR gate against the
+   caller's gravity well BEFORE dispatch.
+2. Reinforce mission: DYNAMIC target = caller identity; corridor re-plans re-read live position;
+   caller offline/dead → last position, then RTB.
+3. Arrival: M6 formation slots around the caller; CONTEXT ADOPTION — combat context (recent damage
+   events/hostiles near caller) → M8 doctrine (until M8 exists: hold formation + flee rules);
+   calm → follow in formation until `/colony release` or the ledger's RTB trip (D4 measured from
+   CURRENT position home, continuously — escorts turn back by name before stranding).
+4. Siege lock: active threat zone at base → reserve doctrine pins to 100%, reinforcements refuse
+   with a named reason.
+5. Acceptance: idle-in-space Leader calls → wing arrives in formation and follows; base under
+   attack → the same call is refused by name; escorts RTB on ledger before stranding.
+
 ### M8+ — Combat drones
 CONTRACT FIRST: expand the MISSION.md placeholder into a full template instance (identity, arc,
 rules-of-engagement stories, ammo-as-fuel ledger, disengage criteria, escort formations, the

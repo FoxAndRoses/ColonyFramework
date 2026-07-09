@@ -257,6 +257,44 @@ IMyUserControllableGun, IMyGasTank) and measured by its own reported numbers (Ma
 so modded thrusters/drills/weapons are covered automatically; blocks that don't implement standard
 interfaces are invisible (accepted limit, documented). → rides **M5/M6**.
 
+## Asset VALUE LEDGER + protective reserve (user-directed)
+The colony must know what its assets are WORTH to decide what it can afford to send away.
+- **ValueScore per asset** (extends ship classes): `tonnage term + material term`. Material term =
+  walk the grid's blocks → block definition components → weighted by material rarity (Pt/U/Au/Ag
+  heavy, Fe/Si light; weights in one table). Computed at commissioning alongside the capture;
+  cached on the AssetRecord (append-only ProtoMember).
+- **Protective reserve doctrine:** the colony keeps a configured fraction of total ValueScore
+  (default 40%, `/colony reserve <pct>`) at base — reserve members are the HIGHEST-value idle
+  assets. Dispatchable surplus = idle ∧ not reserve ∧ not mission-assigned. Every "send ships
+  somewhere" decision (reinforcements, fleet move, shipyard timing) draws only from surplus.
+- This is the state machine that "knows the value of assets to know when it should act": inputs =
+  roster ValueScores + reserve pct + active threats; outputs = surplus list, and a WANTED list for
+  the shipyard (M5) when surplus can't meet standing demand.
+
+## RANKS & REINFORCEMENT contract (user-directed)
+**Ranks:** SE factions natively expose Founder/Leader/Member (readable per identity). Colony maps
+them to command tiers, with per-player overrides persisted in colony state (`/colony rank`).
+Tier gates BOTH the command set (the radial menu builds itself from a server-sent capability list —
+UI-2 renders only what the server says this player may do) AND the reinforcement budget:
+Member → small escort (≤1 ship, ≤S class), Leader → wing (≤3, ≤M), Founder → everything in surplus.
+**Reinforcement flow (Story R-A "Send help"):**
+player (anywhere) calls via radial/chat → NET-1 packet carries identity + live position → server:
+rank tier → budget → ValueLedger surplus selection (nearest-first, class-appropriate) → Reinforce
+missions with a DYNAMIC target (the player identity, position re-read each corridor re-plan — the
+player moves; corridors already re-plan per leg) → on arrival, drones take formation slots around
+the player's ship (M6 offsets) and ADOPT LOCAL CONTEXT:
+- combat context (recent DamageSystem events near the player / hostile grids in range) → engage
+  per combat doctrine (M8 RoE) — "arrivals join the fight";
+- calm context → hold formation, follow the player (Story R-B "Join the fleet") until released
+  (`/colony release`) or the ledger sends them home (fuel/energy — D4 applies to the trip HOME
+  from wherever the player leads them, checked continuously: an escort that follows too far turns
+  back BY NAME before it strands itself).
+**Failure modes to play at implementation:** player in a gravity well the ships can't hover in
+(D2/TWR gate per candidate before dispatch); player dies/logs off mid-flight (mission retargets to
+last position, then RTB); reinforcements pulled while base is under attack (threat zones freeze
+the reserve doctrine at 100% — nothing leaves a besieged base); two players calling at once
+(surplus is a single pool — first-come, remainder gets a named "insufficient surplus" reply).
+
 ## COMBAT DRONE contract (placeholder — full template instance before any code, per the rule)
 Identity: turrets/fixed guns (IMyUserControllableGun/IMyLargeTurretBase — interface-detected, mod
 weapons included), ammo inventory, speed class. Arc: patrol / escort / intercept / RTB. Doctrine to

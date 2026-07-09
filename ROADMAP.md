@@ -244,9 +244,13 @@ Steps:
    world storage (reuses M5's capture code verbatim).
 2. `/colony build <name> here`: site survey (footprint flatness via heightmap variance +
    grid-clearance sphere) → named accept/reject.
-3. Anchor seed spawn (PrefabManager, one-block foundation + projector, gravity-aligned) with
-   component DEBIT from stock — the only spawned thing.
-4. SetProjectedGrid + hand off to the EXISTING weld pipeline (multi-welder, stager, resupply).
+3. FRAME-SPAWN `[verify first]`: build the grid OB from the capture with every block at frame
+   BuildPercent + empty stockpiles; spawn gravity-aligned; DEBIT first-component cost of all
+   blocks from stock. (Fallback: 3-block powered anchor + SetProjectedGrid.) No projector needed.
+4. Weld pipeline targets "incomplete blocks on the construction grid" (integrity check replaces
+   CanBuild in selection; everything else — multi-welder, stager, reach, resupply — unchanged).
+4b. Colony-initiated placement: ring-sampled site scoring (flatness, 30-150 m band, clearance, no
+   ore under footprint) → `proposed: <name>` GPS + `/colony approve` gate.
 5. Site zone: no-go volume for non-assigned fleet + `[verify]` mod-created native Safe Zone for
    players/foreign grids (fallback: Notify warning + graceful stall on intrusion).
 6. Progress: self-renaming GPS marker (`<name> — NN%`), LCD line; completion dissolves the zone

@@ -225,17 +225,27 @@ cooldown, self-knowledge via PrepareForFlight/nap. No stories needed; it is the 
 Player at the core: `/colony build refinery-outpost here` (prefab library = captured building
 blueprints, same capture tech as drones — the player builds each building ONCE, the colony
 captures it forever).
+**Placement (user question, answered):** player-initiated builds place at the player's chosen spot,
+colony VALIDATES (survey below). Colony-INITIATED builds (FleetPlanner wants a shipyard) use
+PROPOSE-AND-APPROVE: ring-sample candidate sites around the base, scored by footprint flatness
+(heightmap variance) + distance band (≥30 m from existing structures, ≤150 m from core) + grid
+clearance + NO KNOWN ORE DEPOSIT UNDER THE FOOTPRINT (never build over future mining) → drop a GPS
+marker `proposed: <name> — /colony approve` and wait. Full autonomy = a later opt-in flag.
 1. **Site survey:** terrain flatness check (heightmap variance over the building footprint) +
    clearance check (no grids in the volume) → named rejection ("site slopes 14 m across the
    footprint — pick flatter ground") or accept.
-2. **Anchor seed:** the ONLY spawn — a one-block foundation grid carrying a projector, spawned
-   gravity-aligned at the site, components DEBITED from colony stock (the sanctioned cheat, at
-   minimum size). Everything else is real.
-3. **Projection + REAL construction:** `SetProjectedGrid(prefab capture)` on the anchor's
-   projector → the EXISTING weld pipeline dispatches welder drones (multi-welder slots, stager
-   order frame→internals→closure, reach solver) — actual welding particles/sounds/build stages;
-   components consumed from stock via the normal resupply loop. No animation is faked because
-   nothing is fake.
+2. **FRAME-SPAWN (user-refined; replaces the anchor+projector — a 1-block anchor can't power a
+   projector):** spawn the building as a REAL grid with every block at FRAME stage — build the OB
+   from the capture with each block's `BuildPercent` at skeleton and component stockpiles empty
+   `[verify: OB spawn honors BuildPercent]`. Debit from stock the FIRST component of every block
+   (what placing a frame costs a player). Result: a physical scaffold that LOOKS like a staked-out
+   construction site, has natural partial collision, needs no projector and no power. Fallback if
+   the OB path misbehaves: 3-block anchor (foundation+battery+projector, debited) + SetProjectedGrid.
+3. **REAL construction:** welder drones complete the frames under fully vanilla rules — the weld
+   pipeline (multi-welder slots, stager order, reach solver) supplies ALL remaining components from
+   stock via the normal resupply loop. Weld-mission targeting generalizes from "projected blocks"
+   to "incomplete blocks on a designated construction grid" (same selection logic; integrity check
+   instead of CanBuild). Actual welding particles/sounds/build stages; nothing is faked.
 4. **Site zone:** construction volume becomes (a) a no-go volume for the colony's own fleet except
    assigned welders (M6 machinery), and (b) `[verify]` a native SAFE ZONE entity (mod-created)
    keeping players/foreign ships out for the duration; fallback if the safe-zone API disappoints:

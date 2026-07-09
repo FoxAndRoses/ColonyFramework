@@ -239,6 +239,23 @@ Steps:
 5. Acceptance: idle-in-space Leader calls → wing arrives in formation and follows; base under
    attack → the same call is refused by name; escorts RTB on ledger before stranding.
 
+### B1 — Construction sites (prefab buildings) [contract: MISSION.md Story B-A; after M5's capture spike]
+1. Prefab library: `/colony capture building <name>` on a player-built structure → sanitized OB in
+   world storage (reuses M5's capture code verbatim).
+2. `/colony build <name> here`: site survey (footprint flatness via heightmap variance +
+   grid-clearance sphere) → named accept/reject.
+3. Anchor seed spawn (PrefabManager, one-block foundation + projector, gravity-aligned) with
+   component DEBIT from stock — the only spawned thing.
+4. SetProjectedGrid + hand off to the EXISTING weld pipeline (multi-welder, stager, resupply).
+5. Site zone: no-go volume for non-assigned fleet + `[verify]` mod-created native Safe Zone for
+   players/foreign grids (fallback: Notify warning + graceful stall on intrusion).
+6. Progress: self-renaming GPS marker (`<name> — NN%`), LCD line; completion dissolves the zone
+   and registers the building (mining exclusion from anchor-spawn moment; power/cargo rollups pick
+   it up per attachment/proximity rules).
+7. Acceptance: one command raises a real building with real welders and visible progress; a player
+   walking into the zone is kept out (or warned, per fallback); stock shortage stalls with named
+   missing components and resumes.
+
 ### M8+ — Combat drones
 CONTRACT FIRST: expand the MISSION.md placeholder into a full template instance (identity, arc,
 rules-of-engagement stories, ammo-as-fuel ledger, disengage criteria, escort formations, the

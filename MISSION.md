@@ -219,6 +219,42 @@ cooldown, self-knowledge via PrepareForFlight/nap. No stories needed; it is the 
 
 ---
 
+# CONSTRUCTION SITE contract — prefab buildings, built for real (user-directed)
+
+## Story B-A — "Raise the refinery"
+Player at the core: `/colony build refinery-outpost here` (prefab library = captured building
+blueprints, same capture tech as drones — the player builds each building ONCE, the colony
+captures it forever).
+1. **Site survey:** terrain flatness check (heightmap variance over the building footprint) +
+   clearance check (no grids in the volume) → named rejection ("site slopes 14 m across the
+   footprint — pick flatter ground") or accept.
+2. **Anchor seed:** the ONLY spawn — a one-block foundation grid carrying a projector, spawned
+   gravity-aligned at the site, components DEBITED from colony stock (the sanctioned cheat, at
+   minimum size). Everything else is real.
+3. **Projection + REAL construction:** `SetProjectedGrid(prefab capture)` on the anchor's
+   projector → the EXISTING weld pipeline dispatches welder drones (multi-welder slots, stager
+   order frame→internals→closure, reach solver) — actual welding particles/sounds/build stages;
+   components consumed from stock via the normal resupply loop. No animation is faked because
+   nothing is fake.
+4. **Site zone:** construction volume becomes (a) a no-go volume for the colony's own fleet except
+   assigned welders (M6 machinery), and (b) `[verify]` a native SAFE ZONE entity (mod-created)
+   keeping players/foreign ships out for the duration; fallback if the safe-zone API disappoints:
+   Notify warning + fleet avoidance + tolerate intrusion (the reach solver already defers blocks a
+   trespasser blocks — construction stalls gracefully, never corrupts).
+5. **Progress display:** a GPS marker that RENAMES itself (`Refinery Outpost — 43%`) from
+   RemainingBlocks/TotalBlocks — MP-synced, zero UI dependency; LCD dashboard line rides along;
+   RichHud world-anchored % text at the site once UI-2 exists.
+6. **Completion:** zone dissolves, GPS finalizes, the building's grid joins the colony (owner =
+   founder; its connectors/pads/storage register into base services; exclusion zones and
+   GroupPower/GroupCargoFill pick it up automatically if physically connected — DETACHED buildings
+   join via the proximity rules from FindColonyProjectors).
+Failure modes pre-played: stock runs dry mid-build (weld missions stand down, GPS shows the stall
+% + missing components via Notify — resumes when production catches up); anchor spawned on a spot
+a drone later mines (build sites become mining exclusion zones the moment the anchor exists);
+player deletes the anchor mid-build (site cancelled, zone dissolved, components already welded
+stay — named log); two builds at once (welder slots already arbitrate; sites queue if welders
+short).
+
 # FLEET-LEVEL contracts (colony-scope, user round-2 additions)
 
 ## Blueprint capture — THE UNLOCK `[verify at first use]`

@@ -265,6 +265,35 @@ player deletes the anchor mid-build (site cancelled, zone dissolved, components 
 stay — named log); two builds at once (welder slots already arbitrate; sites queue if welders
 short).
 
+## BASE TOPOLOGY contract — attach vs found a district (user-directed)
+**The mechanism:** SE grids share power AND cargo through locked connectors — so every building
+capture includes a SERVICE CONNECTOR. "Attach" = the site survey additionally requires the module's
+service connector to land within lock reach of a free base-side connector; on completion it
+auto-Connects and joins the physical group (GroupPower/GroupCargoFill pick it up with zero code).
+"District" = a detached cluster with its own anchor; the colony ESTATE REGISTRY tracks every owned
+structure (transitive proximity graph from the core) and feeds mining exclusion, defense rings, and
+placement scoring.
+
+**Placement policy by function (the "smart enough" table):**
+| Function | Policy | Why |
+|---|---|---|
+| Storage / refinery / assembler | ATTACH to core (connector-bridge); else nearest logistics district | needs the conveyor/logistics web |
+| Solar farms | detached POWER DISTRICT on open, high, unshadowed ground | geometry beats adjacency |
+| Reactors | attach OR power district (player-tunable isolation) | damage isolation trade-off |
+| Shipyard / landing pads | detached YARD DISTRICT ≥60 m from core | traffic + blast separation; open approach corridors |
+| Repair pads | grow the yard district | co-locate maintenance |
+| Defenses (turrets) | PERIMETER RING around the estate hull, spaced by turret coverage, own battery in capture | coverage geometry + damage/power isolation — never clustered at the core |
+**District growth is modular:** a new related building prefers attaching to the nearest district of
+matching function (the yard grows pads; the ring grows turrets at the widest coverage gap). A NEW
+district is founded when the nearest matching district has no valid expansion site or is farther
+than its function tolerates. Every ExpansionPlanner proposal names its placement reasoning
+("proposed: solar farm — power district B, unshadowed plateau 90 m NE").
+Failure modes: no valid attach site for a logistics module (fall back to a logistics district +
+Notify the degraded layout); connector-lock fails on completion (retry, then flag the module
+"unbridged" — functional but unshared, named); defense ring outgrows power (rings are
+self-powered by capture design); estate sprawls into a survey ring or mining field (estate members
+update the exclusion set the moment their anchor spawns — already contracted).
+
 # FLEET-LEVEL contracts (colony-scope, user round-2 additions)
 
 ## Blueprint capture — THE UNLOCK `[verify at first use]`

@@ -295,7 +295,21 @@ last position, then RTB); reinforcements pulled while base is under attack (thre
 the reserve doctrine at 100% — nothing leaves a besieged base); two players calling at once
 (surplus is a single pool — first-come, remainder gets a named "insufficient surplus" reply).
 
-## COMBAT DRONE contract (placeholder — full template instance before any code, per the rule)
+## COLONY POSTURE contract (user-directed; the "Command" radial submenu is its front-end)
+A colony-wide stance (persisted, append-only ProtoMember; per-wing overrides later) that every
+controller consults. Changing posture is rank-gated (Leader+) and Notify-broadcast to the faction.
+
+| Posture | Combat drones | Work drones (miner/welder/survey) | Parker/base |
+|---|---|---|---|
+| **Defensive** (default) | engage only what attacks colony assets/players | normal missions | normal |
+| **Aggressive** | proactively engage identified hostiles in patrol range (M8 RoE still gates IDs) | normal missions; threat zones shrink (bolder) | normal |
+| **Stand down** | weapons hold; hold position/formation | finish current PHASE, then hold — no new legs | no new dispatches |
+| **R&R** | RTB and park | complete current mission, then RTB; no new missions | park all, recharge to full, queue repairs (M7) |
+| **Follow me** (caller-scoped order, not a colony posture) | escort caller (R2 calm-context directly) | unaffected | unaffected |
+Interactions pre-played: posture change mid-mission never hard-aborts (Stand down holds at the next
+phase boundary — a miner 40 m down a shaft climbs out FIRST); R&R + warehouse-full is fine (parking
+needs no cargo space); Aggressive never overrides the siege lock or RoE identification rules;
+Stand down freezes auto-dispatch AND the shipyard (no new hulls while someone ordered quiet).
 Identity: turrets/fixed guns (IMyUserControllableGun/IMyLargeTurretBase — interface-detected, mod
 weapons included), ammo inventory, speed class. Arc: patrol / escort / intercept / RTB. Doctrine to
 write as stories: rules of engagement (fire only on confirmed hostiles that damaged colony assets —

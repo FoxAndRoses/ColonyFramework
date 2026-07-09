@@ -175,14 +175,32 @@ Steps:
 3. Acceptance: full colony control from the core's terminal + hotbar with zero chat typing,
    as host AND as joined client.
 
-### UI-2 — RichHud radial menu (user-approved Tier 3; after UI-1)
-1. Soft dependency handshake with RichHudFramework (standard inter-mod message registration at
-   session start); when absent → log once and fall back to UI-1 (no hard dependency, no crash).
-2. Radial menu (bind key, default vanilla-safe): Dispatch / Recall / Status / Build / Fleet-move
-   (M6) / Brief (M4) — entries route through the NET-1 command path like every other ingress.
-3. HUD status readout (optional page): the LCD dashboard content as a toggleable HUD panel.
-4. Acceptance: radial opens/commands as host and joined client; mod loads cleanly WITHOUT
-   RichHud installed.
+### UI-2 — RichHud radial menu (user-approved Tier 3; after UI-1 and the POSTURE contract)
+UX rules (user directive: thoroughly friendly, sensible nesting):
+- Max 8 slots per ring, max 2 levels deep. Hold-key opens, drag+release selects (one motion);
+  releasing on a submenu opens it, releasing on centre cancels. Most-used entries sit at the
+  cardinal positions of the root.
+- Rank filtering HIDES entries (a Member never sees Founder items — server capability list, R1).
+- Destructive entries (Abort, Decommission) get a confirm ring (drag through twice), nothing else.
+- CONTEXT SENSITIVITY: if the player is AIMING at a registered drone (camera ray), the root gains
+  a "This ship ▸" branch scoped to it; otherwise colony-wide entries only.
+Menu tree (v1):
+- Root: Status (instant HUD readout) · **Command ▸** · Fleet ▸ · Work ▸ · [This ship ▸] · Colony ▸
+- **Command ▸** (the posture front-end, MISSION.md POSTURE): Follow me · Aggressive · Defensive ·
+  Stand down · R&R
+- Fleet ▸: Reinforce me (R2) · Move here (M6) · Release escorts · Recall all
+- Work ▸: Dispatch · Scan here · Build status · Abort⚠
+- This ship ▸ (aimed): Brief (M4) · Recall · Flight test · Decommission⚠
+- Colony ▸ (Founder tier): Reserve % · Ranks · Rename
+Steps:
+1. Soft dependency handshake with RichHudFramework; absent → log once, fall back to UI-1.
+2. Implement the tree above; every leaf routes through the NET-1 command path (the radial is just
+   another ingress); posture leaves require the POSTURE contract's server-side state (small — the
+   state field + the per-controller consults land with this chunk if M8 hasn't yet).
+3. HUD status readout page (LCD dashboard content, toggleable).
+4. Acceptance: full tree usable one-handed as host AND joined client; Member sees a smaller tree;
+   aiming at a drone adds the scoped branch; Abort requires the confirm ring; mod loads cleanly
+   without RichHud installed.
 
 ### V1 — Asset value ledger + protective reserve [contract: MISSION.md VALUE LEDGER]
 (after M5's ship classes; before R2)
